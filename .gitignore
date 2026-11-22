@@ -1,0 +1,51 @@
+# VouchProxy Production Hardened .gitignore
+
+# Binaries and build artifacts
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+vouchproxy
+
+# Sensitive Keys and Certificates (NEVER commit root CA private keys)
+ca.key
+*.key
+*.pem
+*.crt
+*.cert
+
+# Encrypted Vault & Local Configuration
+vault.enc
+vault.enc.tmp
+.vouchproxy/
+vouch.yaml.local
+
+# SQLite Databases & WAL logs
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Test and coverage artifacts
+*.out
+*.test
+coverage.html
+profile.pprof
+
+# OS and Editor metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
