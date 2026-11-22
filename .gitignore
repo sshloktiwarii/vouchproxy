@@ -8,7 +8,7 @@ dist/
 *.dll
 *.so
 *.dylib
-vouchproxy
+/vouchproxy
 
 # Sensitive Keys and Certificates (NEVER commit root CA private keys)
 ca.key
@@ -20,7 +20,7 @@ ca.key
 # Encrypted Vault & Local Configuration
 vault.enc
 vault.enc.tmp
-.vouchproxy/
+./vouchproxy/
 vouch.yaml.local
 
 # SQLite Databases & WAL logs
