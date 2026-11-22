@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-build:
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with race detector
+        run: go test -v -race ./...
+
+      - name: Build stripped release binary
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o bin/vouchproxy ./cmd/vouchproxy
+
+      - name: Verify binary size strictly under 12 MB
+        run: |
+          python3 -c "
+          import os, sys
+          candidates = [f for f in ['bin/vouchproxy', 'bin/vouchproxy.exe'] if os.path.isfile(f)]
+          if not candidates:
+              print('::error::Binary bin/vouchproxy or bin/vouchproxy.exe not found')
+              sys.exit(1)
+          bin_path = candidates[0]
+          size = os.path.getsize(bin_path)
+          max_bytes = 12 * 1024 * 1024  # 12,582,912 bytes
+          mb = size / (1024 * 1024)
+          print(f'Binary: {bin_path}')
+          print(f'Size: {size:,} bytes ({mb:.2f} MB)')
+          print(f'Max limit: {max_bytes:,} bytes (12.00 MB)')
+          if size >= max_bytes:
+              print(f'::error::Binary size {size} exceeds 12 MB limit ({max_bytes} bytes)')
+              sys.exit(1)
+          print('Binary size check passed: strictly under 12 MB')
+          "
