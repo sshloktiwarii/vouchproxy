@@ -66,6 +66,63 @@ vouchproxy audit --tail
 
 ---
 
+## Configuration (`vouch.yaml`)
+
+Configuration resides at `~/.vouchproxy/vouch.yaml`.
+
+```yaml
+version: "1.0"
+
+settings:
+  strict_mode: false            # Block egress to hosts not defined in rules
+  proxy_auth_required: true     # Require per-session bearer token from child
+  mitm_cache_size: 500          # Number of generated TLS certs kept in memory
+  connect_timeout_seconds: 15
+  request_timeout_seconds: 60
+
+canary:
+  enabled: true                 # Detect decoy canary tokens in outbound payloads
+  default_ttl: "24h"            # Expiry duration for minted tokens
+  block_on_detect: true         # Block egress immediately when canary is detected
+
+keyring:
+  enabled: true                 # Secure vault master passphrase in OS keychain
+  service: "vouchproxy"
+
+system_trust:
+  enabled: false                # Temporarily register Root CA into OS trust store
+
+mcp:
+  enabled: true                 # Filter stdio JSON-RPC tool calls and scrub arguments
+  blocked_paths:
+    - "/etc/shadow"
+    - "~/.ssh"
+    - "~/.aws"
+
+scrubbing:
+  emails: true                  # Redact email addresses from outbound requests
+  usernames:                    # Redact local system identities
+    - "$USER"
+    - "$HOSTNAME"
+  custom_regex:
+    - name: "Internal-IPv4"
+      pattern: '\b(?:10|172\.(?:1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}\b'
+      replacement: "[INTERNAL_IP_REDACTED]"
+
+rules:
+  - name: "OpenAI API"
+    host: "api.openai.com"
+    match_type: "exact"
+    allowed_methods: ["POST", "GET"]
+    headers:
+      - name: "Authorization"
+        format: "Bearer {{secret}}"
+        secret: "OPENAI_API_KEY"
+        dummy_match: "VP_OPENAI_API_KEY_DUMMY_*"
+```
+
+---
+
 ## License
 
 MIT

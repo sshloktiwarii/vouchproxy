@@ -10,10 +10,38 @@ import (
 
 // Config represents the complete vouch.yaml configuration structure.
 type Config struct {
-	Version   string          `yaml:"version"`
-	Settings  SettingsConfig  `yaml:"settings"`
-	Scrubbing ScrubbingConfig `yaml:"scrubbing"`
-	Rules     []Rule          `yaml:"rules"`
+	Version     string            `yaml:"version"`
+	Settings    SettingsConfig    `yaml:"settings"`
+	Canary      CanaryConfig      `yaml:"canary,omitempty"`
+	Keyring     KeyringConfig     `yaml:"keyring,omitempty"`
+	SystemTrust SystemTrustConfig `yaml:"system_trust,omitempty"`
+	MCP         MCPConfig         `yaml:"mcp,omitempty"`
+	Scrubbing   ScrubbingConfig   `yaml:"scrubbing"`
+	Rules       []Rule            `yaml:"rules"`
+}
+
+// CanaryConfig defines decoy canary token detection rules.
+type CanaryConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	DefaultTTL    string `yaml:"default_ttl"`
+	BlockOnDetect bool   `yaml:"block_on_detect"`
+}
+
+// KeyringConfig defines OS keychain persistence options.
+type KeyringConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Service string `yaml:"service"`
+}
+
+// SystemTrustConfig defines OS trust store registration flags.
+type SystemTrustConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// MCPConfig defines Model Context Protocol firewall parameters.
+type MCPConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	BlockedPaths []string `yaml:"blocked_paths"`
 }
 
 // SettingsConfig defines runtime proxy operational flags.

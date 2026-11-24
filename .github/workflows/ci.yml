@@ -28,6 +28,14 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
       - name: Run go vet
         run: go vet ./...
 
