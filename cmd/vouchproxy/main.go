@@ -131,6 +131,10 @@ func main() {
 		runSecret(args)
 	case "run":
 		os.Exit(runRun(args))
+	case "env":
+		runEnv(args)
+	case "daemon":
+		runDaemon(args)
 	case "audit":
 		runAudit(args)
 	case "status":
@@ -161,6 +165,7 @@ Commands:
   secret list                List registered vault keys and their dummy tokens
   secret delete <KEY>        Delete a credential from the vault
   run -- <cmd> [args...]     Execute a command sandboxed with dummy tokens and MITM proxy
+  env [--shell <name>] [-u]  Print shell export statements for proxy, CA, and dummy tokens
   audit                      Query the local append-only JSONL audit ledger
   status                     Display health, CA status, and vault statistics
   ca export                  Export local Root CA certificate (PEM)

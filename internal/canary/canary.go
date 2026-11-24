@@ -152,6 +152,116 @@ func ExtractPromptID(token string) string {
 	return "unknown_prompt"
 }
 
+const (
+	// WatermarkHeader marks the beginning of a zero-width Unicode canary watermark.
+	WatermarkHeader = "\u200B\u200C\u200D\uFEFF"
+
+	// WatermarkFooter marks the end of a zero-width Unicode canary watermark.
+	WatermarkFooter = "\uFEFF\u200D\u200C\u200B"
+
+	// Zero-width bit representations
+	zwBit0 = '\u200B'
+	zwBit1 = '\u200C'
+)
+
+// GenerateSessionWatermark generates a deterministic, session-signed zero-width Unicode watermark string.
+func GenerateSessionWatermark(sessionSecret string) string {
+	salt := getCanarySecret()
+	h := hmac.New(sha256.New, salt)
+	h.Write([]byte("vouchproxy_mcp_watermark:" + sessionSecret))
+	sig := hex.EncodeToString(h.Sum(nil)[:8]) // 16 hex chars = 64 bits
+
+	var sb strings.Builder
+	sb.WriteString(WatermarkHeader)
+	for i := 0; i < len(sig); i++ {
+		b := sig[i]
+		for bit := 7; bit >= 0; bit-- {
+			if (b>>bit)&1 == 1 {
+				sb.WriteRune(zwBit1)
+			} else {
+				sb.WriteRune(zwBit0)
+			}
+		}
+	}
+	sb.WriteString(WatermarkFooter)
+	return sb.String()
+}
+
+// WatermarkContent injects a deterministic, session-signed zero-width Unicode canary watermark
+// into content without altering visible text or breaking JSON framing.
+func WatermarkContent(content, sessionSecret string) string {
+	wm := GenerateSessionWatermark(sessionSecret)
+	// Inject at front of content
+	return wm + content
+}
+
+// unescapeZeroWidth unescapes any JSON or ASCII-escaped zero-width Unicode sequences.
+func unescapeZeroWidth(content string) string {
+	if !strings.Contains(content, `\u`) && !strings.Contains(content, `\U`) {
+		return content
+	}
+	r := strings.NewReplacer(
+		`\u200b`, "\u200B", `\u200B`, "\u200B",
+		`\u200c`, "\u200C", `\u200C`, "\u200C",
+		`\u200d`, "\u200D", `\u200D`, "\u200D",
+		`\ufeff`, "\uFEFF", `\uFEFF`, "\uFEFF",
+	)
+	return r.Replace(content)
+}
+
+// DetectWatermark checks whether content contains a valid zero-width canary watermark.
+// If sessionSecret is non-empty, it verifies the signature specifically belongs to this session.
+// It detects both raw UTF-8 zero-width characters and JSON/ASCII-escaped (\u200b) representations.
+func DetectWatermark(content, sessionSecret string) bool {
+	if len(content) == 0 {
+		return false
+	}
+
+	content = unescapeZeroWidth(content)
+
+	startIdx := strings.Index(content, WatermarkHeader)
+	if startIdx == -1 {
+		return false
+	}
+	endIdx := strings.Index(content[startIdx+len(WatermarkHeader):], WatermarkFooter)
+	if endIdx == -1 {
+		return false
+	}
+
+	encodedPayload := content[startIdx+len(WatermarkHeader) : startIdx+len(WatermarkHeader)+endIdx]
+	runes := []rune(encodedPayload)
+	if len(runes) == 0 || len(runes)%8 != 0 {
+		return false
+	}
+
+	var decodedBytes []byte
+	for i := 0; i < len(runes); i += 8 {
+		var b byte
+		for bit := 0; bit < 8; bit++ {
+			r := runes[i+bit]
+			if r == zwBit1 {
+				b = (b << 1) | 1
+			} else if r == zwBit0 {
+				b = (b << 1) | 0
+			} else {
+				return false
+			}
+		}
+		decodedBytes = append(decodedBytes, b)
+	}
+
+	extractedSig := string(decodedBytes)
+	if sessionSecret != "" {
+		salt := getCanarySecret()
+		h := hmac.New(sha256.New, salt)
+		h.Write([]byte("vouchproxy_mcp_watermark:" + sessionSecret))
+		expectedSig := hex.EncodeToString(h.Sum(nil)[:8])
+		return hmac.Equal([]byte(extractedSig), []byte(expectedSig))
+	}
+
+	return len(extractedSig) > 0
+}
+
 func computeHMAC(message string, key []byte) string {
 	h := hmac.New(sha256.New, key)
 	h.Write([]byte(message))

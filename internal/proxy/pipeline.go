@@ -10,7 +10,6 @@ import (
 
 	"github.com/sshloktiwarii/vouchproxy/internal/audit"
 	"github.com/sshloktiwarii/vouchproxy/internal/canary"
-	"github.com/sshloktiwarii/vouchproxy/internal/mcp"
 	"github.com/sshloktiwarii/vouchproxy/internal/policy"
 	"github.com/sshloktiwarii/vouchproxy/internal/tui"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
@@ -47,22 +46,16 @@ func (pr *pipelineResult) ToAuditEvent(sessionID, host string, port int) audit.A
 	}
 }
 
-// executePipeline performs canary checking, secret injection, PII scrubbing, and upstream round-trip.
+// executePipeline performs canary checking, secret injection, PII scrubbing, and upstream round-trip
+// using O(1) rolling-window body streaming without buffering the entire body into memory.
 func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Response, pipelineResult) {
-	// Pre-read body up to 10 MB for canary scanning and MCP inspection
-	var bodyBytes []byte
-	if req.Body != nil {
-		bodyBytes, _ = io.ReadAll(io.LimitReader(req.Body, 10*1024*1024))
-		req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), req.Body))
-	}
-
-	// Stage 1: Canary Token Exfiltration Check
-	if blocked, canaryResult := h.checkCanaryTokens(req, bodyBytes, start); blocked {
+	// Stage 1: Canary Token & Session Watermark Exfiltration Check (Headers & URL)
+	if blocked, canaryResult := h.checkCanaryTokens(req, start); blocked {
 		return nil, canaryResult
 	}
 
 	dummyToKey := h.vaultInstance.DummyToKeyMap()
-	eval := h.policyEngine.EvaluateRequestBody(req, bodyBytes, dummyToKey)
+	eval := h.policyEngine.EvaluateRequest(req, dummyToKey)
 
 	res := pipelineResult{
 		EvaluationResult: eval,
@@ -83,25 +76,68 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 		return nil, res
 	}
 
-	// Stage 2: Secret Injection & MCP Rewriting
-	h.injectSecrets(req, eval, &bodyBytes)
+	// Stage 2: Secret Injection (Headers)
+	h.injectSecrets(req, eval)
 
-	// Stage 3: PII Scrubbing
-	res.ScrubCount = h.scrubPII(req, bodyBytes)
+	// Stage 3: PII Scrubbing (Headers)
+	res.ScrubCount = h.scrubHeaders(req.Header)
 
 	// Remove hop-by-hop headers
 	req.Header.Del("Proxy-Authorization")
 	req.Header.Del("Proxy-Connection")
 
-	// Stage 4: Outbound Dispatch
+	// Stage 4: Wrap Body with O(1) Rolling-Window StreamScannerReader
+	var streamScanner *StreamScannerReader
+	if req.Body != nil && req.Body != http.NoBody {
+		rule := h.policyEngine.FindRule(req.Host, req.Method)
+		streamScanner = NewStreamScannerReader(StreamScannerOptions{
+			Source:        req.Body,
+			TargetHost:    req.Host,
+			Method:        req.Method,
+			Rule:          rule,
+			DummyToKey:    dummyToKey,
+			Vault:         h.vaultInstance,
+			Scrubber:      h.policyEngine.Scrubber(),
+			SessionSecret: h.sessionSecret,
+			SessionID:     h.sessionID,
+		})
+
+		// Whenever body substitution alters byte length or is eligible for rewriting,
+		// delete Content-Length and set ContentLength = -1 so Go's http.Transport uses chunked transfer encoding.
+		if rule != nil || h.policyEngine.Scrubber() != nil {
+			EnsureChunkedEncoding(req)
+		}
+		req.Body = streamScanner
+	}
+
+	// Stage 5: Outbound Dispatch
 	resp, err := h.dispatchUpstream(req)
 	if err != nil {
+		// Check if the stream scanner aborted due to an exfiltration attempt mid-stream
+		if streamScanner != nil && streamScanner.Blocked() {
+			res.Action = policy.ActionBlockLeak
+			res.ShouldBlock = true
+			res.BlockStatus = http.StatusForbidden
+			res.ErrorMessage = streamScanner.BlockReason()
+			res.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
+
+			tui.GlobalFeed.Publish(tui.RequestEntry{
+				Method:    req.Method,
+				Host:      req.Host,
+				Path:      req.URL.Path,
+				Status:    res.BlockStatus,
+				LatencyMs: res.LatencyMs,
+				Timestamp: time.Now(),
+			})
+			return nil, res
+		}
+
 		res.ErrorMessage = fmt.Sprintf("Upstream dial failure: %v", err)
 		res.BlockStatus = http.StatusBadGateway
 		return nil, res
 	}
 
-	// Stage 5: Response Canary Regurgitation Check
+	// Stage 6: Response Canary Regurgitation Check
 	h.inspectResponseCanaries(resp, req, res.LatencyMs)
 
 	res.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
@@ -119,13 +155,15 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 	return resp, res
 }
 
-func (h *Handler) checkCanaryTokens(req *http.Request, bodyBytes []byte, start time.Time) (bool, pipelineResult) {
-	searchCorpus := string(bodyBytes) + " " + req.URL.RequestURI()
+func (h *Handler) checkCanaryTokens(req *http.Request, start time.Time) (bool, pipelineResult) {
+	searchCorpus := req.URL.RequestURI()
 	for _, vals := range req.Header {
 		searchCorpus += " " + strings.Join(vals, " ")
 	}
+
 	canaries := canary.FindCanaryTokens(searchCorpus)
-	if len(canaries) == 0 {
+	hasWatermark := canary.DetectWatermark(searchCorpus, h.sessionSecret)
+	if len(canaries) == 0 && !hasWatermark {
 		return false, pipelineResult{}
 	}
 
@@ -152,7 +190,12 @@ func (h *Handler) checkCanaryTokens(req *http.Request, bodyBytes []byte, start t
 	res.Action = policy.ActionBlockLeak
 	res.ShouldBlock = true
 	res.BlockStatus = http.StatusForbidden
-	res.ErrorMessage = fmt.Sprintf("Blocked attempt to exfiltrate canary token for prompt(s): %s to unauthorized host %s", strings.Join(promptIDs, ", "), req.Host)
+
+	if hasWatermark {
+		res.ErrorMessage = fmt.Sprintf("Blocked attempt to exfiltrate session canary watermark to unauthorized host %s", req.Host)
+	} else {
+		res.ErrorMessage = fmt.Sprintf("Blocked attempt to exfiltrate canary token for prompt(s): %s to unauthorized host %s", strings.Join(promptIDs, ", "), req.Host)
+	}
 
 	tui.GlobalFeed.Publish(tui.RequestEntry{
 		Method:    req.Method,
@@ -166,7 +209,7 @@ func (h *Handler) checkCanaryTokens(req *http.Request, bodyBytes []byte, start t
 	return true, res
 }
 
-func (h *Handler) injectSecrets(req *http.Request, eval policy.EvaluationResult, bodyBytes *[]byte) {
+func (h *Handler) injectSecrets(req *http.Request, eval policy.EvaluationResult) {
 	if eval.Action == policy.ActionInjectSecret && eval.RuleName != "" {
 		rule := h.policyEngine.FindRule(req.Host, req.Method)
 		if rule != nil {
@@ -196,38 +239,11 @@ func (h *Handler) injectSecrets(req *http.Request, eval policy.EvaluationResult,
 			}
 		}
 	}
-
-	// MCP HTTP-SSE message rewriting: rewrite dummy tokens in JSON payload for authorized hosts only
-	if len(*bodyBytes) > 0 {
-		rule := h.policyEngine.FindRule(req.Host, req.Method)
-		if rule != nil {
-			bodyStr := string(*bodyBytes)
-			rewrittenStr := mcp.RewritePayloadString(bodyStr, h.vaultInstance)
-			if rewrittenStr != bodyStr {
-				*bodyBytes = []byte(rewrittenStr)
-				req.Body = io.NopCloser(bytes.NewReader(*bodyBytes))
-				req.ContentLength = int64(len(*bodyBytes))
-			}
-		}
-	}
 }
 
-func (h *Handler) scrubPII(req *http.Request, bodyBytes []byte) int {
+func (h *Handler) scrubHeaders(headers http.Header) int {
 	scrubber := h.policyEngine.Scrubber()
-	scrubCount := scrubber.ScrubHeaders(req.Header)
-
-	if len(bodyBytes) > 0 {
-		isGzip := strings.Contains(req.Header.Get("Content-Encoding"), "gzip")
-		scrubbedBody, bCount, sErr := scrubber.ScrubBody(bodyBytes, isGzip)
-		if sErr == nil && bCount > 0 {
-			scrubCount += bCount
-			req.Body = io.NopCloser(bytes.NewReader(scrubbedBody))
-			req.ContentLength = int64(len(scrubbedBody))
-		} else {
-			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		}
-	}
-	return scrubCount
+	return scrubber.ScrubHeaders(headers)
 }
 
 func (h *Handler) dispatchUpstream(req *http.Request) (*http.Response, error) {

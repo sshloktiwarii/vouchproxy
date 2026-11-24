@@ -2,7 +2,7 @@ package version
 
 var (
 	// Version is the current release version of VouchProxy.
-	Version = "1.0.0"
+	Version = "1.1.0"
 
 	// GitCommit is the short commit hash at build time.
 	GitCommit = "unknown"

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sshloktiwarii/vouchproxy/internal/canary"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
 )
 
@@ -175,5 +176,75 @@ func TestRewritePayloadString(t *testing.T) {
 	}
 	if !strings.Contains(output, "sk-real-openai-secret-key-12345") {
 		t.Fatal("expected real secret in output")
+	}
+}
+
+func TestMCP_ContextReadingToolDetection(t *testing.T) {
+	contextTools := []string{"read_file", "grep_search", "view_file", "cat", "mcp__read_file", "fs:read_file"}
+	for _, tool := range contextTools {
+		if !IsContextReadingTool(tool) {
+			t.Errorf("expected %s to be recognized as context-reading tool", tool)
+		}
+	}
+
+	nonContextTools := []string{"execute_sql", "calculate", "search_web", "list_models"}
+	for _, tool := range nonContextTools {
+		if IsContextReadingTool(tool) {
+			t.Errorf("expected %s NOT to be recognized as context-reading tool", tool)
+		}
+	}
+}
+
+func TestMCP_WatermarkToolResponse(t *testing.T) {
+	sessionSecret := "test_mcp_session_secret_12345"
+
+	resp := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      101,
+		"result": map[string]any{
+			"content": []any{
+				map[string]any{
+					"type": "text",
+					"text": "CRITICAL CONFIG: database_password = secret_root_password",
+				},
+			},
+		},
+	}
+	rawResp, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watermarked, modified := WatermarkToolResponse(rawResp, sessionSecret)
+	if !modified {
+		t.Fatal("expected response to be modified with watermark")
+	}
+
+	// 1. Verify JSON framing is valid
+	var parsedResp map[string]any
+	if err := json.Unmarshal(watermarked, &parsedResp); err != nil {
+		t.Fatalf("watermarked response broke JSON framing: %v", err)
+	}
+
+	// 2. Extract text field and verify visible text is preserved
+	resultMap, _ := parsedResp["result"].(map[string]any)
+	contentList, _ := resultMap["content"].([]any)
+	firstItem, _ := contentList[0].(map[string]any)
+	textVal, _ := firstItem["text"].(string)
+
+	expectedVisible := "CRITICAL CONFIG: database_password = secret_root_password"
+	if !strings.Contains(textVal, expectedVisible) {
+		t.Fatalf("expected visible text to be preserved, got %q", textVal)
+	}
+
+	// 3. Verify watermark detection
+	if !canary.DetectWatermark(textVal, sessionSecret) {
+		t.Fatal("expected session watermark to be detected in text field")
+	}
+
+	// 4. Verify detection fails for a different session
+	wrongSecret := "different_session_secret_99999"
+	if canary.DetectWatermark(textVal, wrongSecret) {
+		t.Fatal("expected watermark verification to fail for wrong session secret")
 	}
 }

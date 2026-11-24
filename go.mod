@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/muesli/termenv v0.16.0
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.36.0
+	golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -30,5 +30,5 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )

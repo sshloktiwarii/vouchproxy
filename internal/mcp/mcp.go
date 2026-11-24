@@ -5,12 +5,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/sshloktiwarii/vouchproxy/internal/canary"
 	"github.com/sshloktiwarii/vouchproxy/internal/runner"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
 )
@@ -213,14 +214,97 @@ func InspectToolCall(reqBytes []byte, v *vault.Vault) FilterResult {
 	return FilterResult{Rewritten: reqBytes}
 }
 
+// IsContextReadingTool checks whether a tool name corresponds to a sensitive context-reading operation.
+func IsContextReadingTool(toolName string) bool {
+	lower := strings.ToLower(toolName)
+	contextTools := []string{"read_file", "grep_search", "view_file", "cat"}
+	for _, ct := range contextTools {
+		if lower == ct || strings.HasSuffix(lower, "_"+ct) || strings.HasSuffix(lower, ":"+ct) || strings.HasSuffix(lower, "/"+ct) {
+			return true
+		}
+	}
+	return false
+}
+
+// WatermarkToolResult recursively injects zero-width canary watermarks into text fields of an MCP tool result.
+func WatermarkToolResult(result any, sessionSecret string) any {
+	switch val := result.(type) {
+	case string:
+		return canary.WatermarkContent(val, sessionSecret)
+	case map[string]any:
+		newMap := make(map[string]any, len(val))
+		for k, v := range val {
+			if k == "text" {
+				if s, ok := v.(string); ok {
+					newMap[k] = canary.WatermarkContent(s, sessionSecret)
+					continue
+				}
+			}
+			newMap[k] = WatermarkToolResult(v, sessionSecret)
+		}
+		return newMap
+	case []any:
+		newSlice := make([]any, len(val))
+		for i, item := range val {
+			newSlice[i] = WatermarkToolResult(item, sessionSecret)
+		}
+		return newSlice
+	default:
+		return result
+	}
+}
+
+// WatermarkToolResponse intercepts a JSON-RPC response from a context-reading tool and injects the canary watermark.
+func WatermarkToolResponse(respBytes []byte, sessionSecret string) ([]byte, bool) {
+	if len(respBytes) == 0 {
+		return respBytes, false
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(respBytes, &raw); err != nil {
+		return respBytes, false
+	}
+
+	res, exists := raw["result"]
+	if !exists || res == nil {
+		return respBytes, false
+	}
+
+	raw["result"] = WatermarkToolResult(res, sessionSecret)
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return respBytes, false
+	}
+	return out, true
+}
+
+// StdioProxyOptions configures the MCP stdio proxy with session and watermarking support.
+type StdioProxyOptions struct {
+	Vault         *vault.Vault
+	SigChan       <-chan os.Signal
+	SessionID     string
+	SessionSecret string
+	AutoWatermark bool
+}
+
 // RunStdioProxy wraps child process stdio, applying JSON-RPC inspection to incoming lines.
 func RunStdioProxy(childCmd *exec.Cmd, v *vault.Vault) error {
-	_, err := RunStdioProxyWithSignals(childCmd, v, nil)
+	_, err := RunStdioProxyWithOptions(childCmd, StdioProxyOptions{Vault: v})
 	return err
 }
 
 // RunStdioProxyWithSignals wraps child process stdio, coordinating with signals and semantic inspection.
 func RunStdioProxyWithSignals(childCmd *exec.Cmd, v *vault.Vault, sigChan <-chan os.Signal) (int, error) {
+	return RunStdioProxyWithOptions(childCmd, StdioProxyOptions{
+		Vault:         v,
+		SigChan:       sigChan,
+		AutoWatermark: true,
+	})
+}
+
+// RunStdioProxyWithOptions wraps child process stdio, coordinating with signals, semantic inspection,
+// and automatic MCP file-context canary watermarking.
+func RunStdioProxyWithOptions(childCmd *exec.Cmd, opts StdioProxyOptions) (int, error) {
 	childStdin, err := childCmd.StdinPipe()
 	if err != nil {
 		return 1, fmt.Errorf("failed to open child stdin pipe: %w", err)
@@ -237,11 +321,36 @@ func RunStdioProxyWithSignals(childCmd *exec.Cmd, v *vault.Vault, sigChan <-chan
 		return 1, fmt.Errorf("failed to start child command: %w", err)
 	}
 
+	inFlightContext := &sync.Map{}
 	stdoutDone := make(chan struct{})
-	// Stream 2: Child Stdout -> Parent Stdout
+
+	// Stream 2: Child Stdout -> Automatic Canary Watermarking -> Parent Stdout
 	go func() {
 		defer close(stdoutDone)
-		_, _ = io.Copy(os.Stdout, childStdout)
+		reader := bufio.NewReader(childStdout)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				trimmed := bytes.TrimSpace(line)
+				if opts.AutoWatermark && len(trimmed) > 0 {
+					var raw map[string]any
+					if json.Unmarshal(trimmed, &raw) == nil {
+						if idVal, exists := raw["id"]; exists && idVal != nil {
+							idKey := fmt.Sprintf("%v", idVal)
+							if _, isContext := inFlightContext.LoadAndDelete(idKey); isContext {
+								if watermarked, modified := WatermarkToolResponse(trimmed, opts.SessionSecret); modified {
+									trimmed = watermarked
+								}
+							}
+						}
+					}
+				}
+				_, _ = os.Stdout.Write(append(trimmed, '\n'))
+			}
+			if err != nil {
+				return
+			}
+		}
 	}()
 
 	// Stream 1: Parent Stdin -> Semantic Firewall -> Child Stdin
@@ -253,7 +362,16 @@ func RunStdioProxyWithSignals(childCmd *exec.Cmd, v *vault.Vault, sigChan <-chan
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
 				trimmed := bytes.TrimSpace(line)
-				res := InspectToolCall(trimmed, v)
+
+				// Track in-flight context tool calls for response watermarking
+				var rpcReq JSONRPCRequest
+				if err := json.Unmarshal(trimmed, &rpcReq); err == nil && rpcReq.Method == "tools/call" && rpcReq.Params != nil {
+					if name, ok := rpcReq.Params["name"].(string); ok && IsContextReadingTool(name) {
+						inFlightContext.Store(fmt.Sprintf("%v", rpcReq.ID), name)
+					}
+				}
+
+				res := InspectToolCall(trimmed, opts.Vault)
 
 				if res.Blocked {
 					// Return JSON-RPC error directly to parent stdout (client)
@@ -317,7 +435,7 @@ func RunStdioProxyWithSignals(childCmd *exec.Cmd, v *vault.Vault, sigChan <-chan
 	}()
 
 	select {
-	case sig := <-sigChan:
+	case sig := <-opts.SigChan:
 		_ = runner.TerminateProcessGroup(childCmd)
 		select {
 		case err := <-childDone:

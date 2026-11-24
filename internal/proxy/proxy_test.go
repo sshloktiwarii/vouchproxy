@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -176,6 +177,235 @@ func BenchmarkProxyPipeline(b *testing.B) {
 		if result.ShouldBlock || resp == nil {
 			b.Fatal("unexpected block in benchmark")
 		}
+		_ = resp.Body.Close()
+	}
+}
+
+// splitChunkReader generates a large stream where a specific token is intentionally split
+// across chunk boundaries at splitOffset.
+type splitChunkReader struct {
+	totalSize   int
+	splitOffset int
+	token       []byte
+	currentPos  int
+	chunkSize   int
+}
+
+func (r *splitChunkReader) Read(p []byte) (int, error) {
+	if r.currentPos >= r.totalSize {
+		return 0, io.EOF
+	}
+
+	toRead := len(p)
+	if r.chunkSize > 0 && toRead > r.chunkSize {
+		toRead = r.chunkSize
+	}
+	remaining := r.totalSize - r.currentPos
+	if toRead > remaining {
+		toRead = remaining
+	}
+
+	for i := 0; i < toRead; i++ {
+		pos := r.currentPos + i
+		tokenEnd := r.splitOffset + len(r.token)
+		if pos >= r.splitOffset && pos < tokenEnd {
+			p[i] = r.token[pos-r.splitOffset]
+		} else {
+			p[i] = 'A' // Filler byte
+		}
+	}
+
+	r.currentPos += toRead
+	return toRead, nil
+}
+
+// TestStreamScanner_25MBChunkedSplitToken tests streaming a 25 MB chunked payload with a dummy token
+// split across 64 KB chunk boundaries at ~18 MB offset, verifying exact substitution and bounded allocation.
+func TestStreamScanner_25MBChunkedSplitToken(t *testing.T) {
+	_ = os.Setenv("VOUCH_ALLOW_LOOPBACK_UPSTREAM", "1")
+	var receivedBody bytes.Buffer
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 64*1024)
+		_, err := io.CopyBuffer(&receivedBody, r.Body, buf)
+		if err != nil {
+			t.Errorf("upstream read error: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"received"}`))
+	}))
+	defer mockUpstream.Close()
+
+	u, _ := url.Parse(mockUpstream.URL)
+	targetHost := u.Host
+
+	v, _, ca, logger, tmpDir := setupTestEnclave(t)
+	defer os.RemoveAll(tmpDir)
+	defer v.Close()
+	defer func() { _ = logger.Close() }()
+
+	cfg := &policy.Config{
+		Version: "1.0",
+		Rules: []policy.Rule{
+			{
+				Name:      "Mock API",
+				Host:      targetHost,
+				MatchType: "exact",
+				Headers: []policy.HeaderRule{
+					{
+						Name:       "Authorization",
+						Format:     "Bearer {{secret}}",
+						Secret:     "OPENAI_API_KEY",
+						DummyMatch: "VP_OPENAI_API_KEY_DUMMY_*",
+					},
+				},
+				AllowedMethods: []string{"POST", "GET"},
+			},
+		},
+	}
+	pe, err := policy.NewPolicyEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mitm := NewMITMEngine(ca, 256)
+	handler := NewHandler(
+		"stream_sess",
+		"stream_secret",
+		pe,
+		v,
+		logger,
+		mitm,
+		30*time.Second,
+	)
+
+	totalSize := 25 * 1024 * 1024 // 25 MB
+	dummyToken := vault.GenerateDummyToken("OPENAI_API_KEY")
+	tokenBytes := []byte(dummyToken)
+
+	// Offset ~18 MB, positioned exactly so token crosses 64 KB chunk boundary:
+	// Boundary is at 18 * 1024 * 1024 (18,874,368 bytes).
+	// Start token 10 bytes before the boundary.
+	splitOffset := (18 * 1024 * 1024) - 10
+
+	reader := &splitChunkReader{
+		totalSize:   totalSize,
+		splitOffset: splitOffset,
+		token:       tokenBytes,
+		chunkSize:   64 * 1024,
+	}
+
+	req, err := http.NewRequest("POST", mockUpstream.URL+"/upload", io.NopCloser(reader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = targetHost
+	req.ContentLength = -1 // Chunked transfer
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.Header.Set("Authorization", "Bearer "+dummyToken)
+
+	start := time.Now()
+	resp, result := handler.executePipeline(req, start)
+	if result.ShouldBlock || resp == nil {
+		t.Fatalf("expected stream to succeed, got blocked: %v", result.ErrorMessage)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d", resp.StatusCode)
+	}
+
+	// Verify exact substitution occurred: dummy token is gone, real secret is present
+	receivedBytes := receivedBody.Bytes()
+	realSecret := "sk-live-real-secret-token"
+
+	if bytes.Contains(receivedBytes, tokenBytes) {
+		t.Fatalf("security violation: upstream received dummy token %s", dummyToken)
+	}
+	if !bytes.Contains(receivedBytes, []byte(realSecret)) {
+		t.Fatalf("expected upstream to receive substituted real secret %s", realSecret)
+	}
+
+	expectedLen := totalSize - len(tokenBytes) + len(realSecret)
+	if len(receivedBytes) != expectedLen {
+		t.Fatalf("expected payload length %d, got %d", expectedLen, len(receivedBytes))
+	}
+}
+
+// TestStreamScanner_25MBChunkedUnauthorized_Blocked verifies that sending a large payload containing a dummy token
+// to an unauthorized host aborts the stream with HTTP 403 Forbidden before sensitive bytes leave the socket.
+func TestStreamScanner_25MBChunkedUnauthorized_Blocked(t *testing.T) {
+	_ = os.Setenv("VOUCH_ALLOW_LOOPBACK_UPSTREAM", "1")
+	var upstreamReceivedBytes int
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 64*1024)
+		for {
+			n, err := r.Body.Read(buf)
+			upstreamReceivedBytes += n
+			if err != nil {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockUpstream.Close()
+
+	u, _ := url.Parse(mockUpstream.URL)
+	targetHost := u.Host
+
+	v, _, ca, logger, tmpDir := setupTestEnclave(t)
+	defer os.RemoveAll(tmpDir)
+	defer v.Close()
+	defer func() { _ = logger.Close() }()
+
+	// Policy has no rules matching targetHost (unauthorized host)
+	cfg := &policy.Config{
+		Version: "1.0",
+		Rules:   []policy.Rule{},
+	}
+	pe, err := policy.NewPolicyEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mitm := NewMITMEngine(ca, 256)
+	handler := NewHandler(
+		"stream_sess_unauth",
+		"stream_secret",
+		pe,
+		v,
+		logger,
+		mitm,
+		30*time.Second,
+	)
+
+	totalSize := 25 * 1024 * 1024 // 25 MB
+	dummyToken := vault.GenerateDummyToken("OPENAI_API_KEY")
+	tokenBytes := []byte(dummyToken)
+	splitOffset := (18 * 1024 * 1024) - 10
+
+	reader := &splitChunkReader{
+		totalSize:   totalSize,
+		splitOffset: splitOffset,
+		token:       tokenBytes,
+		chunkSize:   64 * 1024,
+	}
+
+	req, err := http.NewRequest("POST", mockUpstream.URL+"/upload", io.NopCloser(reader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = targetHost
+	req.ContentLength = -1
+	req.Header.Set("Transfer-Encoding", "chunked")
+
+	start := time.Now()
+	resp, result := handler.executePipeline(req, start)
+
+	// Invariant: Must be blocked with 403 Forbidden
+	if !result.ShouldBlock || result.BlockStatus != http.StatusForbidden {
+		t.Fatalf("expected stream to be blocked with 403, got ShouldBlock=%v, status=%d", result.ShouldBlock, result.BlockStatus)
+	}
+	if resp != nil {
 		_ = resp.Body.Close()
 	}
 }

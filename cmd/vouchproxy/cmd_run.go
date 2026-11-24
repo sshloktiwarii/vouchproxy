@@ -200,7 +200,13 @@ func runRun(args []string) int {
 
 	var exitCode int
 	if *mcpStdio {
-		exitCode, err = mcp.RunStdioProxyWithSignals(childCmd, v, sigChan)
+		exitCode, err = mcp.RunStdioProxyWithOptions(childCmd, mcp.StdioProxyOptions{
+			Vault:         v,
+			SigChan:       sigChan,
+			SessionID:     sessionID,
+			SessionSecret: sessionSecret,
+			AutoWatermark: cfg.MCP.IsAutoWatermarkEnabled(),
+		})
 	} else {
 		exitCode, err = runner.RunSupervisedWithSignals(childCmd, sigChan, tuiQuitChan)
 	}

@@ -40,8 +40,17 @@ type SystemTrustConfig struct {
 
 // MCPConfig defines Model Context Protocol firewall parameters.
 type MCPConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	BlockedPaths []string `yaml:"blocked_paths"`
+	Enabled       bool     `yaml:"enabled"`
+	AutoWatermark *bool    `yaml:"auto_watermark,omitempty"`
+	BlockedPaths  []string `yaml:"blocked_paths"`
+}
+
+// IsAutoWatermarkEnabled returns true if auto watermarking is enabled (default true when MCP is active).
+func (m MCPConfig) IsAutoWatermarkEnabled() bool {
+	if m.AutoWatermark == nil {
+		return true
+	}
+	return *m.AutoWatermark
 }
 
 // SettingsConfig defines runtime proxy operational flags.

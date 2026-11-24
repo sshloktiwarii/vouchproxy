@@ -1,0 +1,53 @@
+version: 2
+
+project_name: vouchproxy
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: vouchproxy
+    main: ./cmd/vouchproxy
+    binary: vouchproxy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/sshloktiwarii/vouchproxy/internal/version.Version={{.Version}} -X github.com/sshloktiwarii/vouchproxy/internal/version.GitCommit={{.Commit}} -X github.com/sshloktiwarii/vouchproxy/internal/version.BuildDate={{.Date}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE*
+      - docs/*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
