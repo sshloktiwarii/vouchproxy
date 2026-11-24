@@ -19,6 +19,7 @@ import (
 	"github.com/sshloktiwarii/vouchproxy/internal/crypto"
 	"github.com/sshloktiwarii/vouchproxy/internal/policy"
 	"github.com/sshloktiwarii/vouchproxy/internal/proxy"
+	"github.com/sshloktiwarii/vouchproxy/internal/runner"
 )
 
 // DaemonState stores metadata for active background proxy listeners.
@@ -87,9 +88,7 @@ func ensureProxyListener(vouchDir string) (int, string, error) {
 	cmd.Env = os.Environ()
 
 	// Detach process
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	}
+	runner.SetProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return 0, "", fmt.Errorf("failed to start background daemon: %w", err)
@@ -302,6 +301,6 @@ func runDaemon(args []string) {
 	_ = caCertPath
 
 	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 }

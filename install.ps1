@@ -1,4 +1,4 @@
-﻿# VouchProxy Windows PowerShell Installer
+# VouchProxy Windows PowerShell Installer
 $ErrorActionPreference = 'Stop'
 
 $Repo = "sshloktiwarii/vouchproxy"
