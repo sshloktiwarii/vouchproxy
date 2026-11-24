@@ -1,0 +1,372 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "skipped",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-11-22T12:01:47.275Z",
+  "specification": {
+    "path": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/candidate.json",
+    "sha256": "d1044953c303a575a2bcb85ffe692075f4d04ceba49c2cf8eac1001e4fe0c17b",
+    "bytes": 3905
+  },
+  "artifact": {
+    "path": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+    "sha256": "7e94598cdfadb8bbf65616c3818aa9cf52a5e387cbfcfd412a5c5796bb65069b",
+    "bytes": 766043
+  },
+  "stages": {
+    "validate": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": null,
+      "execution": "embedded-in-deliver",
+      "command": [
+        "/opt/homebrew/Cellar/node/26.8.2/bin/node",
+        "/Users/shloktiwari/.gemini/config/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/candidate.json",
+        "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+        "--quality",
+        "showcase",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "validate",
+        "specification": {
+          "sha256": "d1044953c303a575a2bcb85ffe692075f4d04ceba49c2cf8eac1001e4fe0c17b",
+          "bytes": 3905
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    "deliver": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 170,
+      "command": [
+        "/opt/homebrew/Cellar/node/26.8.2/bin/node",
+        "/Users/shloktiwari/.gemini/config/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/candidate.json",
+        "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+        "--quality",
+        "showcase",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "receiptId": "ee54911d-6712-4b84-8e3f-5edfb58a9740",
+        "ok": true,
+        "command": "deliver",
+        "type": "architecture",
+        "input": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/candidate.json",
+        "output": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+        "specification": {
+          "sha256": "d1044953c303a575a2bcb85ffe692075f4d04ceba49c2cf8eac1001e4fe0c17b",
+          "bytes": 3905
+        },
+        "artifact": {
+          "sha256": "7e94598cdfadb8bbf65616c3818aa9cf52a5e387cbfcfd412a5c5796bb65069b",
+          "bytes": 766043
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        },
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      }
+    },
+    "check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 82,
+      "command": [
+        "/opt/homebrew/Cellar/node/26.8.2/bin/node",
+        "/Users/shloktiwari/.gemini/config/skills/archify/bin/archify.mjs",
+        "check",
+        "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+        "--require-provenance"
+      ],
+      "receipt": {
+        "ok": true,
+        "file": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+        "artifact": {
+          "sha256": "7e94598cdfadb8bbf65616c3818aa9cf52a5e387cbfcfd412a5c5796bb65069b",
+          "bytes": 766043
+        },
+        "checks": [
+          {
+            "name": "single_svg",
+            "ok": true,
+            "details": [
+              "found 1 <svg> block(s)"
+            ]
+          },
+          {
+            "name": "finite_svg",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "orthogonal_arrows",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "label_route_clearance",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_crossings",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_corridors",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "container_border_runs",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "route_rhythm",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "legend_clearance",
+            "ok": true,
+            "details": []
+          }
+        ],
+        "composition": {
+          "schemaVersion": 1,
+          "profile": "showcase",
+          "status": "pass",
+          "summary": {
+            "errors": 0,
+            "warnings": 0
+          },
+          "metrics": {
+            "properCrossings": 0,
+            "resolvedCrossovers": 0,
+            "ambiguousCorridors": 0,
+            "arrowheadCollisions": 0,
+            "containerBorderRuns": 0,
+            "labelRouteClearanceIssues": 0,
+            "labelCanvasOverflowIssues": 0,
+            "minLabelRouteClearance": 52.6,
+            "desktopReadabilityIssues": 0,
+            "viewportHeightIssues": 0,
+            "minProjectedNodeTextPx": 6.992207792207792,
+            "maxBends": 0,
+            "routesOverSuggestedBends": 0,
+            "maxStretch": 1,
+            "routesOverSuggestedStretch": 0,
+            "minSegmentPx": 96,
+            "minInteriorSegmentPx": null,
+            "shortSegmentCount": 0,
+            "shortEndpointSegmentCount": 0,
+            "shortInteriorSegmentCount": 0,
+            "microSegmentCount": 0
+          },
+          "suggestedLimits": {
+            "bendsPerRelationship": 2,
+            "stretch": 1.35,
+            "segmentPx": 16,
+            "microSegmentPx": 8
+          },
+          "routeReview": {
+            "crossings": [],
+            "detours": []
+          },
+          "leadingSpace": {
+            "measured": true,
+            "emptyTopPx": 90,
+            "emptyTopRatio": 0.152,
+            "occupiedTop": 90,
+            "viewBoxTop": 0,
+            "canvasHeight": 592,
+            "typicalNodeHeight": 64,
+            "reviewSuggested": false
+          },
+          "desktopReadability": {
+            "budgetBasis": "recognized-declared-wide",
+            "readerContract": "declared-wide-v1",
+            "availableDiagramWidth": 1346,
+            "actualBudgetPx": 1346,
+            "actualReaderWidth": 1376,
+            "desiredReaderWidth": 1473.75,
+            "viewportCap": 1376,
+            "limit": "viewport-cap",
+            "requestedTargetPx": 7.5,
+            "requestedTargetMet": false,
+            "hardFloorPx": 6,
+            "hardFloorMet": true,
+            "minimumOwner": {
+              "kind": "edge",
+              "id": "agent-to-runner",
+              "from": "agent",
+              "to": "runner"
+            },
+            "minimumSourceTextPx": 8,
+            "minimumProjectedTextPx": 6.992207792207792,
+            "semanticTextCount": 31
+          },
+          "issues": []
+        },
+        "provenance": "current",
+        "deliveryReceiptId": "ee54911d-6712-4b84-8e3f-5edfb58a9740"
+      }
+    },
+    "browser-check": {
+      "status": "skipped",
+      "exitCode": 2,
+      "durationMs": 10,
+      "command": [
+        "/opt/homebrew/Cellar/node/26.8.2/bin/node",
+        "/Users/shloktiwari/.gemini/config/skills/archify/bin/archify.mjs",
+        "browser-check",
+        "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+        "--json",
+        "--require-provenance"
+      ],
+      "execution": "in-process",
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "browser-check",
+        "evidenceKind": "automated-browser",
+        "status": "skipped",
+        "visualReview": "not-requested",
+        "provenance": "current",
+        "deliveryReceiptId": "ee54911d-6712-4b84-8e3f-5edfb58a9740",
+        "artifact": {
+          "path": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+          "sha256": "7e94598cdfadb8bbf65616c3818aa9cf52a5e387cbfcfd412a5c5796bb65069b",
+          "bytes": 766043
+        },
+        "state": {
+          "detail": "read",
+          "motion": "still"
+        },
+        "chrome": {
+          "status": "unavailable",
+          "executable": null
+        },
+        "diagnostics": [
+          {
+            "code": "viewer/chrome-unavailable",
+            "severity": "warning",
+            "message": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path.",
+            "subject": {
+              "artifact": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html"
+            },
+            "evidence": {
+              "executable": null
+            },
+            "supportedFixes": [
+              "set ARCHIFY_CHROME to a Chrome or Chromium executable and rerun browser-check"
+            ]
+          }
+        ],
+        "containment": {
+          "status": "skipped",
+          "policy": "fit-or-reader-declared-readable-vertical-scroll",
+          "viewports": []
+        },
+        "themeStates": {
+          "status": "skipped",
+          "viewports": []
+        },
+        "readability": {
+          "status": "skipped",
+          "minimumProjectedNodeTextPx": 6,
+          "viewports": []
+        },
+        "viewerChrome": {
+          "status": "skipped",
+          "viewports": []
+        },
+        "captures": {
+          "status": "not-requested",
+          "screenshots": [],
+          "contactSheet": null
+        },
+        "sidecars": {
+          "receipt": "vouchproxy.browser-check.json",
+          "files": []
+        },
+        "error": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path."
+      }
+    }
+  },
+  "diagnostics": [
+    {
+      "code": "viewer/chrome-unavailable",
+      "severity": "warning",
+      "message": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path.",
+      "subject": {
+        "artifact": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html"
+      },
+      "evidence": {
+        "executable": null
+      },
+      "supportedFixes": [
+        "set ARCHIFY_CHROME to a Chrome or Chromium executable and rerun browser-check"
+      ]
+    }
+  ],
+  "evidence": {
+    "receipt": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.finalize.json",
+    "summaryReceipt": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.finalize-summary.json",
+    "browserCheckReceipt": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.browser-check.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "browser-check",
+  "finishedAt": "2026-11-22T12:01:47.619Z",
+  "durationMs": 343,
+  "update": {
+    "status": "update_available",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.2.0",
+    "releaseNotes": "https://github.com/tt-a1i/archify/releases/tag/v3.2.0",
+    "severity": "normal",
+    "checkedAt": "2026-11-22T12:01:02.999Z",
+    "source": "cache",
+    "noticeRequired": true,
+    "noticeText": "Archify update: 3.0.1 → 3.2.0. A previous check at 2026-11-22T12:01:02.999Z found a newer release. Release notes: https://github.com/tt-a1i/archify/releases/tag/v3.2.0. The installed Skill has not changed; ask to snooze or ignore this reminder.",
+    "eventKey": "archify@sha256:70e210265c59f24dcbdf2a502ff671104b5454e7ee7d3554aecd86bad32384f5"
+  }
+}

@@ -107,6 +107,34 @@ func Create(path string, passphrase []byte) (*Vault, error) {
 	}, nil
 }
 
+// OpenWithKeychain unlocks and decrypts the vault using the master passphrase from KeychainManager.
+func OpenWithKeychain(path string, km KeychainManager) (*Vault, error) {
+	if km == nil {
+		return nil, errors.New("keychain manager cannot be nil")
+	}
+	passphrase, err := km.GetMasterPassphrase()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve master passphrase from keychain: %w", err)
+	}
+	defer crypto.ZeroBytes(passphrase)
+
+	return Open(path, passphrase)
+}
+
+// CreateWithKeychain initializes a new encrypted vault and persists the master passphrase to KeychainManager.
+func CreateWithKeychain(path string, passphrase []byte, km KeychainManager) (*Vault, error) {
+	v, err := Create(path, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	if km != nil {
+		if err := km.SetMasterPassphrase(passphrase); err != nil {
+			return v, fmt.Errorf("vault created but failed to persist passphrase to keychain: %w", err)
+		}
+	}
+	return v, nil
+}
+
 // Get retrieves a secret by key name, returning a safe SecretBytes buffer.
 func (v *Vault) Get(key string) (SecretBytes, error) {
 	v.mu.RLock()

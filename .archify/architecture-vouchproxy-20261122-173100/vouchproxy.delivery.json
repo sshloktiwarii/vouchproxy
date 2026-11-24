@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "ee54911d-6712-4b84-8e3f-5edfb58a9740",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/candidate.json",
+  "output": "/Users/shloktiwari/Documents/untitled folder/v1/.archify/architecture-vouchproxy-20261122-173100/vouchproxy.html",
+  "specification": {
+    "sha256": "d1044953c303a575a2bcb85ffe692075f4d04ceba49c2cf8eac1001e4fe0c17b",
+    "bytes": 3905
+  },
+  "artifact": {
+    "sha256": "7e94598cdfadb8bbf65616c3818aa9cf52a5e387cbfcfd412a5c5796bb65069b",
+    "bytes": 766043
+  }
+}

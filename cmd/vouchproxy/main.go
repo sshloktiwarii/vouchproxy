@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,17 +10,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/sshloktiwarii/vouchproxy/internal/audit"
+	"github.com/sshloktiwarii/vouchproxy/internal/canary"
 	"github.com/sshloktiwarii/vouchproxy/internal/certs"
 	"github.com/sshloktiwarii/vouchproxy/internal/crypto"
+	"github.com/sshloktiwarii/vouchproxy/internal/mcp"
 	"github.com/sshloktiwarii/vouchproxy/internal/policy"
 	"github.com/sshloktiwarii/vouchproxy/internal/proxy"
 	"github.com/sshloktiwarii/vouchproxy/internal/runner"
+	"github.com/sshloktiwarii/vouchproxy/internal/tui"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
 	"github.com/sshloktiwarii/vouchproxy/pkg/version"
 )
@@ -36,38 +41,92 @@ func defaultVouchDir() string {
 }
 
 func readPasswordMasked(prompt string) ([]byte, error) {
+	fmt.Fprint(os.Stderr, prompt)
+
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		pass, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read password: %w", err)
+		}
+		if len(pass) == 0 {
+			return nil, errors.New("passphrase cannot be empty")
+		}
+		return pass, nil
+	}
+
+	// Non-terminal fallback (pipes, redirects, automated tests)
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return nil, fmt.Errorf("failed to read passphrase: %w", err)
+	}
+	clean := bytes.TrimRight(line, "\r\n")
+	if len(clean) == 0 {
+		return nil, errors.New("passphrase cannot be empty")
+	}
+	res := make([]byte, len(clean))
+	copy(res, clean)
+	crypto.ZeroBytes(line)
+	return res, nil
+}
+
+// readMasterPassphrase implements the 3-tier master passphrase resolution hierarchy:
+// 1. VOUCH_MASTER_KEY environment variable.
+// 2. OS Keychain zero-prompt unlock via km.GetMasterPassphrase().
+// 3. Masked terminal prompt fallback via readPasswordMasked.
+func readMasterPassphrase(km vault.KeychainManager, prompt string) ([]byte, error) {
+	// 1. Environment variable override
 	if envPass := os.Getenv("VOUCH_MASTER_KEY"); envPass != "" {
 		return []byte(envPass), nil
 	}
 
-	fmt.Fprint(os.Stderr, prompt)
-
-	// On Unix systems, disable terminal echo via stty if available
-	if runtime.GOOS != "windows" {
-		sttyCmd := exec.Command("stty", "-echo")
-		sttyCmd.Stdin = os.Stdin
-		if err := sttyCmd.Run(); err == nil {
-			defer func() {
-				restoreCmd := exec.Command("stty", "echo")
-				restoreCmd.Stdin = os.Stdin
-				_ = restoreCmd.Run()
-				fmt.Fprintln(os.Stderr)
-			}()
+	// 2. OS Keychain zero-prompt unlock
+	if km != nil {
+		if pass, err := km.GetMasterPassphrase(); err == nil && len(pass) > 0 {
+			return pass, nil
 		}
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
+	// 3. Masked terminal prompt fallback
+	return readPasswordMasked(prompt)
+}
+
+// unlockVault unlocks the vault using the 3-tier hierarchy:
+// 1. VOUCH_MASTER_KEY environment variable.
+// 2. OS Keychain zero-prompt unlock.
+// 3. Masked terminal prompt fallback (saving to keychain on success).
+func unlockVault(vaultPath string) (*vault.Vault, error) {
+	// Tier 1: Environment variable override
+	if envPass := os.Getenv("VOUCH_MASTER_KEY"); envPass != "" {
+		pass := []byte(envPass)
+		return vault.Open(vaultPath, pass)
+	}
+
+	km := vault.NewOSKeyringManager("", "")
+
+	// Tier 2: OS Keychain zero-prompt unlock via vault.OpenWithKeychain
+	if v, err := vault.OpenWithKeychain(vaultPath, km); err == nil {
+		return v, nil
+	}
+
+	// Tier 3: Masked terminal prompt fallback
+	passphrase, err := readPasswordMasked("Enter Master Vault Passphrase: ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to read password: %w", err)
+		return nil, err
+	}
+	defer crypto.ZeroBytes(passphrase)
+
+	v, err := vault.Open(vaultPath, passphrase)
+	if err != nil {
+		return nil, err
 	}
 
-	clean := strings.TrimRight(line, "\r\n")
-	if len(clean) == 0 {
-		return nil, errors.New("passphrase cannot be empty")
-	}
+	// Persist to keychain upon successful manual unlock to re-enable zero-prompt
+	_ = km.SetMasterPassphrase(passphrase)
 
-	return []byte(clean), nil
+	return v, nil
 }
 
 func main() {
@@ -85,13 +144,15 @@ func main() {
 	case "secret":
 		runSecret(args)
 	case "run":
-		runRun(args)
+		os.Exit(runRun(args))
 	case "audit":
 		runAudit(args)
 	case "status":
 		runStatus(args)
 	case "ca":
 		runCA(args)
+	case "canary":
+		runCanary(args)
 	case "version", "--version", "-v":
 		fmt.Printf("vouchproxy version %s (commit %s)\n", version.Version, version.GitCommit)
 	default:
@@ -125,6 +186,7 @@ func runInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	dir := fs.String("dir", defaultVouchDir(), "Directory to initialize configuration and vault")
 	force := fs.Bool("force", false, "Overwrite existing configuration")
+	systemTrust := fs.Bool("system-trust", false, "Register Root CA into OS system trust store")
 	_ = fs.Parse(args)
 
 	targetDir := *dir
@@ -157,9 +219,28 @@ func runInit(args []string) {
 	}
 	fmt.Printf("✓ Generated local Root CA (%s, %s)\n", caCertPath, caKeyPath)
 
+	if *systemTrust {
+		trustMgr := certs.NewSystemTrustManager()
+		if err := trustMgr.InstallCA(caCertPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error registering system trust: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("✓ Registered local Root CA into OS system trust store")
+	}
+
 	// 2. Prompt for master vault passphrase
-	passphrase, err := readPasswordMasked("Enter Master Vault Passphrase (min 8 chars): ")
-	if err != nil || len(passphrase) < 8 {
+	var passphrase []byte
+	if envPass := os.Getenv("VOUCH_MASTER_KEY"); envPass != "" {
+		passphrase = []byte(envPass)
+	} else {
+		var err error
+		passphrase, err = readPasswordMasked("Enter Master Vault Passphrase (min 8 chars): ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if len(passphrase) < 8 {
 		fmt.Fprintln(os.Stderr, "Error: Passphrase must be at least 8 characters")
 		os.Exit(1)
 	}
@@ -175,6 +256,14 @@ func runInit(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("✓ Created encrypted vault with 0600 permissions (%s)\n", vaultPath)
+
+	// Save master passphrase to OS Keychain for zero-prompt unlock
+	km := vault.NewOSKeyringManager("", "")
+	if err := km.SetMasterPassphrase(passphrase); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to store passphrase in OS keychain: %v\n", err)
+	} else {
+		fmt.Println("✓ Stored master passphrase in OS Keychain for zero-prompt unlock")
+	}
 
 	// 4. Scaffold default policy template
 	if _, err := os.Stat(configPath); os.IsNotExist(err) || *force {
@@ -211,14 +300,7 @@ func runSecret(args []string) {
 		}
 		keyName := strings.ToUpper(strings.TrimSpace(subArgs[0]))
 
-		passphrase, err := readPasswordMasked("Enter Master Vault Passphrase: ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		defer crypto.ZeroBytes(passphrase)
-
-		v, err := vault.Open(vaultPath, passphrase)
+		v, err := unlockVault(vaultPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening vault: %v\n", err)
 			os.Exit(1)
@@ -240,14 +322,7 @@ func runSecret(args []string) {
 			keyName, vault.GenerateDummyToken(keyName))
 
 	case "list":
-		passphrase, err := readPasswordMasked("Enter Master Vault Passphrase: ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		defer crypto.ZeroBytes(passphrase)
-
-		v, err := vault.Open(vaultPath, passphrase)
+		v, err := unlockVault(vaultPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening vault: %v\n", err)
 			os.Exit(1)
@@ -274,14 +349,7 @@ func runSecret(args []string) {
 		}
 		keyName := strings.ToUpper(strings.TrimSpace(subArgs[0]))
 
-		passphrase, err := readPasswordMasked("Enter Master Vault Passphrase: ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		defer crypto.ZeroBytes(passphrase)
-
-		v, err := vault.Open(vaultPath, passphrase)
+		v, err := unlockVault(vaultPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening vault: %v\n", err)
 			os.Exit(1)
@@ -300,7 +368,7 @@ func runSecret(args []string) {
 	}
 }
 
-func runRun(args []string) {
+func runRun(args []string) int {
 	var flagArgs []string
 	var cmdArgs []string
 
@@ -319,11 +387,14 @@ func runRun(args []string) {
 	configPath := fs.String("config", "", "Path to vouch.yaml policy file")
 	auditLogPath := fs.String("audit-log", "", "Path to audit JSONL file")
 	strict := fs.Bool("strict", false, "Enable strict mode (block all unmapped outbound hosts)")
+	systemTrust := fs.Bool("system-trust", false, "Register Root CA into OS system trust store for duration of execution")
+	mcpStdio := fs.Bool("mcp-stdio", false, "Enable MCP stdio JSON-RPC semantic firewall")
+	tuiMode := fs.Bool("tui", false, "Enable interactive Bubbletea split-pane TUI dashboard")
 	_ = fs.Parse(flagArgs)
 
 	if len(cmdArgs) == 0 {
 		fmt.Fprintln(os.Stderr, "Error: no command provided after '--'. Example: vouchproxy run -- curl https://api.openai.com/v1/models")
-		os.Exit(1)
+		return 1
 	}
 
 	vouchDir := defaultVouchDir()
@@ -341,21 +412,26 @@ func runRun(args []string) {
 	ca, err := certs.LoadCA(vouchDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading CA from %s: %v\nRun 'vouchproxy init' first.\n", vouchDir, err)
-		os.Exit(1)
+		return 1
+	}
+
+	// Register Ephemeral System Trust Store if requested (fail closed on error)
+	var cleanupTrust func()
+	if *systemTrust {
+		trustMgr := certs.NewSystemTrustManager()
+		cleanupTrust, err = trustMgr.RegisterTeardown(caCertPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error registering system trust: %v\n", err)
+			return 1
+		}
+		defer cleanupTrust()
 	}
 
 	// 2. Unlock Vault
-	passphrase, err := readPasswordMasked("Enter Master Vault Passphrase: ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	defer crypto.ZeroBytes(passphrase)
-
-	v, err := vault.Open(vaultPath, passphrase)
+	v, err := unlockVault(vaultPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening vault: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer v.Close()
 
@@ -363,7 +439,7 @@ func runRun(args []string) {
 	cfg, err := policy.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading policy from %s: %v\n", *configPath, err)
-		os.Exit(1)
+		return 1
 	}
 	if *strict {
 		cfg.Settings.StrictMode = true
@@ -372,14 +448,14 @@ func runRun(args []string) {
 	pe, err := policy.NewPolicyEngine(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating policy engine: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// 4. Initialize Zero-Bloat Append-Only JSONL Audit Logger
 	logger, err := audit.NewLogger(*auditLogPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening audit log: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer func() { _ = logger.Close() }()
 
@@ -387,7 +463,7 @@ func runRun(args []string) {
 	sessionSecret, err := crypto.RandomHex(32)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating session secret: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// 5. Start Local Proxy Server
@@ -402,7 +478,7 @@ func runRun(args []string) {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating proxy server: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	_ = proxySrv.Start()
@@ -424,14 +500,99 @@ func runRun(args []string) {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error preparing command: %v\n", err)
+		return 1
+	}
+
+	var cleanupTUI func()
+	if *tuiMode {
+		_, cleanupTUI = tui.StartTUI()
+	}
+	defer func() {
+		if cleanupTUI != nil {
+			cleanupTUI()
+		}
+	}()
+
+	var exitCode int
+	if *mcpStdio {
+		err = mcp.RunStdioProxy(childCmd, v)
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+	} else {
+		exitCode, err = runner.RunSupervised(childCmd)
+	}
+
+	if err != nil && exitCode == 0 {
+		fmt.Fprintf(os.Stderr, "Child process error: %v\n", err)
+	}
+	if cleanupTrust != nil {
+		cleanupTrust()
+	}
+	return exitCode
+}
+
+func runCanary(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: vouchproxy canary <mint|verify> [arguments...]")
 		os.Exit(1)
 	}
 
-	exitCode, err := runner.RunSupervised(childCmd)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Child process error: %v\n", err)
+	subCmd := args[0]
+	subArgs := args[1:]
+
+	switch subCmd {
+	case "mint":
+		fs := flag.NewFlagSet("canary mint", flag.ExitOnError)
+		promptID := fs.String("prompt", "", "Prompt identifier")
+		keyName := fs.String("key", "", "Key name to associate with canary")
+		ttlStr := fs.String("ttl", "1h", "Time-to-live duration (e.g. 10m, 1h, -120s)")
+		_ = fs.Parse(subArgs)
+
+		if *promptID == "" || *keyName == "" {
+			fmt.Fprintln(os.Stderr, "Error: --prompt and --key are required")
+			os.Exit(1)
+		}
+
+		ttl, err := time.ParseDuration(*ttlStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing --ttl: %v\n", err)
+			os.Exit(1)
+		}
+
+		token, err := canary.Mint(*promptID, *keyName, ttl)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error minting canary token: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(token)
+
+	case "verify":
+		fs := flag.NewFlagSet("canary verify", flag.ExitOnError)
+		token := fs.String("token", "", "Canary token to verify")
+		_ = fs.Parse(subArgs)
+
+		if *token == "" {
+			fmt.Fprintln(os.Stderr, "Error: --token is required")
+			os.Exit(1)
+		}
+
+		tok, err := canary.Verify(*token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: canary token verification failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Canary token valid:\n  Prompt ID: %s\n  Key Name:  %s\n  Expires:   %s\n",
+			tok.PromptID, tok.KeyName, tok.ExpiresAt.Format(time.RFC3339))
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown canary subcommand: %s\n", subCmd)
+		os.Exit(1)
 	}
-	os.Exit(exitCode)
 }
 
 func runAudit(args []string) {
