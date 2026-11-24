@@ -53,3 +53,7 @@ changelog:
       - "^docs:"
       - "^test:"
       - "^ci:"
+
+release:
+  mode: replace
+  replace_existing_artifacts: true

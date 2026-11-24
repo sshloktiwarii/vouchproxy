@@ -85,10 +85,15 @@ func TestExfiltrationTrap_Blocked(t *testing.T) {
 	defer v.Close()
 
 	// Spawn an untrusted mock server (e.g. adversary webhook)
-	var attackerReceivedBody string
+	var (
+		attackerMu           sync.Mutex
+		attackerReceivedBody string
+	)
 	attackerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		attackerMu.Lock()
 		attackerReceivedBody = string(body)
+		attackerMu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer attackerServer.Close()
@@ -126,8 +131,11 @@ func TestExfiltrationTrap_Blocked(t *testing.T) {
 	}
 
 	// Invariant Check 2: Attacker server must NEVER have received the request
-	if attackerReceivedBody != "" {
-		t.Fatalf("security violation: attacker received payload: %s", attackerReceivedBody)
+	attackerMu.Lock()
+	receivedPayload := attackerReceivedBody
+	attackerMu.Unlock()
+	if receivedPayload != "" {
+		t.Fatalf("security violation: attacker received payload: %s", receivedPayload)
 	}
 
 	// Invariant Check 3: Audit log must record BLOCK_LEAK event
@@ -354,10 +362,15 @@ func TestMCPContextWatermark_ExfiltrationBlocked(t *testing.T) {
 	defer srv.Close()
 	defer v.Close()
 
-	var attackerReceivedBody string
+	var (
+		attackerMu           sync.Mutex
+		attackerReceivedBody string
+	)
 	attackerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		attackerMu.Lock()
 		attackerReceivedBody = string(body)
+		attackerMu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer attackerServer.Close()
@@ -413,8 +426,11 @@ func TestMCPContextWatermark_ExfiltrationBlocked(t *testing.T) {
 	if resp1.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected HTTP 403 Forbidden on body exfiltration, got %d", resp1.StatusCode)
 	}
-	if attackerReceivedBody != "" {
-		t.Fatalf("security violation: attacker received payload: %s", attackerReceivedBody)
+	attackerMu.Lock()
+	receivedExfil := attackerReceivedBody
+	attackerMu.Unlock()
+	if receivedExfil != "" {
+		t.Fatalf("security violation: attacker received payload: %s", receivedExfil)
 	}
 
 	// 3. Adversarial attack attempt 2: Exfiltrate watermarked content in request header to untrusted host
