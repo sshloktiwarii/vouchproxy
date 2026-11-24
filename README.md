@@ -1,187 +1,107 @@
 # VouchProxy
 
-> **Host-Scoped Credential Injection & PII-Scrubbing Local MITM Proxy for AI Coding Agents and MCP Servers**
+VouchProxy is a loopback proxy that injects host-scoped credentials and scrubs sensitive identifiers from outbound HTTP and HTTPS traffic emitted by AI coding agents, subprocesses, and Model Context Protocol (MCP) servers.
 
-[![Build & Test](https://github.com/sshloktiwarii/vouchproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/sshloktiwarii/vouchproxy)
-[![Go Version](https://img.shields.io/badge/go-1.23%2B-blue.svg)](https://golang.org)
-[![Security Standard](https://img.shields.io/badge/security-Zero--Trust%20Loopback-brightgreen.svg)](#security-invariants)
-[![Binary Size](https://img.shields.io/badge/binary%20size-7.7%20MB-blueviolet.svg)](#performance-benchmarks)
-[![Hot-Path Latency](https://img.shields.io/badge/latency-0.039%20ms-success.svg)](#performance-benchmarks)
+Instead of granting agent processes access to plaintext API keys or `.env` files, VouchProxy runs the agent in an environment containing only dummy tokens (such as `VP_OPENAI_API_KEY_DUMMY_8f9a2b`). When the agent issues an outbound request, VouchProxy intercepts the traffic, validates the destination host against a local policy, swaps the dummy token for the real secret in memory, redacts configured PII patterns, and forwards the request to the upstream API.
 
 ---
 
-## 1. Problem & Value Proposition
-
-Modern autonomous AI coding agents (`claude-code`, `aider`, `gemini-cli`, `cursor`) and Model Context Protocol (MCP) servers create serious security risks:
-- **Plaintext `.env` Exposure:** Agents read local `.env` files into prompt contexts, write them into public Git commits, or leak them in debug traces.
-- **Subprocess Identity Leaks:** Outbound calls from `curl`, `python`, `npm`, and `git` broadcast your workstation username, local hostname, and personal email in `User-Agent` and `From` headers.
-- **Confused Deputy & Issuer Confusion:** Prompt injection attacks can trick an agent into sending bearer tokens to adversary-controlled webhook endpoints.
-
-**VouchProxy** solves this by enforcing **host-scoped sovereign zero-trust**:
-1. **Dummy Token Substitution:** The child agent runs in an environment populated solely with non-functional placeholder dummy tokens (e.g. `VP_GITHUB_TOKEN_DUMMY_8f9a2b`).
-2. **Transparent Local MITM Proxy:** VouchProxy listens on an ephemeral loopback port (`127.0.0.1:<random>`) and validates a per-session random bearer token.
-3. **Fail-Closed Secret Swap:** Outbound requests are intercepted. If and only if the destination host and target header match an authorized rule in `vouch.yaml`, VouchProxy swaps the dummy token with the real secret from an Argon2id + AES-256-GCM encrypted local vault (`vault.enc`).
-4. **Exfiltration Trap:** If an agent attempts to send a dummy token to an unauthorized domain or endpoint, VouchProxy drops the request with `HTTP 403 Forbidden` and logs a security incident.
-5. **Bi-Directional PII Scrubbing:** Outbound headers, URL query parameters, and JSON/form bodies are scrubbed to strip developer emails, hostnames, and system usernames before leaving your machine.
-6. **Zero-Bloat Architecture:** Zero CGO, no heavy database runtimes. Standalone static binary ($7.7\text{ MB}$) with append-only buffered JSONL audit logging (`audit.jsonl`).
-
----
-
-## 2. System Architecture & Floorplan
+## How It Works
 
 ```
-+==================================================================================================================+
-|                                              LOCAL WORKSTATION HOST                                              |
-+==================================================================================================================+
-|                                                                                                                  |
-|  [UNTRUSTED CHILD AGENT]                                             [VOUCHPROXY SOVEREIGN ENCLAVE]               |
-|                                                                                                                  |
-|  +-------------------------------------+                              +---------------------------------------+  |
-|  | Autonomous Agent Process Tree       |                              | VouchProxy Core Supervisor            |  |
-|  | - claude-code / aider / gemini-cli  |                              | - 127.0.0.1:<ephemeral-port>          |  |
-|  | - Subprocesses: curl, python, git   |                              | - Session Auth Secret Validator       |  |
-|  +-------------------------------------+                              +---------------------------------------+  |
-|       |                                                                            |      |                      |
-|       | 1. Injected Child Environment:                                             |      |                      |
-|       |    - HTTP_PROXY/HTTPS_PROXY = http://session:<token>@127.0.0.1:<port>      |      |                      |
-|       |    - SSL_CERT_FILE = ~/.vouchproxy/ca.crt                                  |      |                      |
-|       |    - OPENAI_API_KEY = VP_OPENAI_KEY_DUMMY_123                              |      |                      |
-|       v                                                                            |      |                      |
-|  +-------------------------------------+                                           |      |                      |
-|  | Outbound Request Emitted            |                                           |      |                      |
-|  | Host: api.openai.com                |                                           |      |                      |
-|  | Auth: Bearer VP_OPENAI_KEY_DUMMY... |                                           |      |                      |
-|  +-------------------------------------+                                           |      |                      |
-|       |                                                                            |      |                      |
-|       +=====================> [LOOPBACK TRUST BOUNDARY (407)] =====================+      |                      |
-|                                                                                           |                      |
-|                               [INTERCEPTION & FILTERING PIPELINE]                         |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                               | A. HTTP/HTTPS CONNECT Listener (127.0.0.1 only)       |   |                      |
-|                               |    - Validates Proxy-Authorization Session Token      |   |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                                                            |                              |                      |
-|                                                            v                              |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                               | B. Dynamic TLS MITM Engine (ECDSA P-256)              |   |                      |
-|                               |    - Validates SNI == Host header (No DNS Rebind)     |   |                      |
-|                               |    - Bounded 256-item LRU Certificate Cache           |   |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                                                            |                              |                      |
-|                                                            v                              |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                               | C. Policy Matcher & Dummy Leak Trap                   |   |                      |
-|                               |    - Match host against vouch.yaml                    |   |                      |
-|                               |    - If dummy token on unauthorized host -> HTTP 403   |   |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                                      |                                   |                |                      |
-|                   (If Authorized)    |                                   | (If Scrubbing  |                      |
-|                                      v                                   v  Configured)   |                      |
-|               +-------------------------------+      +-------------------------+          |                      |
-|               | D. Vault Module               |      | E. PII Scrubber         |          |                      |
-|               |    - Memory-zeroed key fetch  |      |    - Redacts email,     |          |                      |
-|               |    - Swaps dummy with real    |      |      hostname, username |          |                      |
-|               +-------------------------------+      +-------------------------+          |                      |
-|                                      |                                   |                |                      |
-|                                      +-----------------+-----------------+                |                      |
-|                                                        |                                  |                      |
-|                                                        v                                  |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                               | F. Upstream Streaming Dialer (sync.Pool 32KB Buffers) |   |                      |
-|                               |    - Zero response buffering                          |   |                      |
-|                               +-------------------------------------------------------+   |                      |
-|                                                        |                                  |                      |
-|       +================================================+                                  |                      |
-|       |                                                                                   |                      |
-|       v                                                                                   v                      |
-|  [PERSISTENT VAULT (0600)]                                              [APPEND-ONLY AUDIT (0600)]                |
-|  +--------------------------------+                                     +-------------------------------------+  |
-|  | ~/.vouchproxy/vault.enc        |                                     | ~/.vouchproxy/audit.jsonl           |  |
-|  | - Argon2id + AES-256-GCM       |                                     | - Fast reverse-seek tailing         |  |
-|  | - Plaintext never on disk      |                                     | - ZERO raw secrets logged           |  |
-|  +--------------------------------+                                     +-------------------------------------+  |
-+==================================================================================================================+
-                                        | (Encrypted Outbound Egress)
-                                        v
-                        +===============================+
-                        | Authorized Upstream APIs      |
-                        | - api.openai.com              |
-                        | - api.anthropic.com           |
-                        | - api.github.com              |
-                        +===============================+
++-----------------------------------------------------------------------------------+
+| Host Workstation                                                                  |
+|                                                                                   |
+|  [Child Agent Process]                          [VouchProxy Loopback Daemon]      |
+|  - Injected env:                                - Listen on 127.0.0.1:<port>      |
+|    HTTP_PROXY=http://session:<token>@127.0.0.1  - Validate Proxy-Authorization    |
+|    OPENAI_API_KEY=VP_OPENAI_KEY_DUMMY_...       - Mint leaf cert via local CA     |
+|                                                                                   |
+|         |                                                      |                  |
+|         | 1. HTTP/HTTPS request with dummy token               |                  |
+|         +----------------------------------------------------->|                  |
+|                                                                |                  |
+|                                                    2. Inspect request             |
+|                                                       - Check session token (407) |
+|                                                       - Check SNI == Host header  |
+|                                                       - Match host in vouch.yaml  |
+|                                                       - Swap dummy -> real secret |
+|                                                       - Redact emails/usernames   |
+|                                                                |                  |
+|                                                    3. Egress to upstream          |
+|                                                       +--------+                  |
++-------------------------------------------------------|--------|------------------+
+                                                        |        v
+                                                        |  [Upstream API]
+                                                        |  api.openai.com
+                                                        v
+                                          [Local Storage (0600)]
+                                          - vault.enc (Argon2id + AES-256-GCM)
+                                          - audit.jsonl / SQLite ledger
 ```
+
+1. **Process Supervision**: VouchProxy spawns the agent as a child process inside a dedicated process group (POSIX) or Job Object (Windows). It injects proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), the custom root CA certificate path (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`), and dummy tokens mapped from the vault.
+2. **Session Authentication**: The proxy binds strictly to `127.0.0.1` on an ephemeral port. Each run generates a random 32-byte secret required in the `Proxy-Authorization` header. Requests lacking this credential receive `HTTP 407 Proxy Authentication Required`.
+3. **TLS Interception**: For HTTPS connections, VouchProxy handles the HTTP `CONNECT` tunnel and mints on-the-fly leaf certificates signed by a local Root CA generated during `init`. Leaf certificates use ECDSA P-256 and are cached in memory.
+4. **Host-Scoped Credential Swap**: When a request matches a configured rule in `vouch.yaml`, VouchProxy retrieves the real secret from the encrypted in-memory vault and substitutes the dummy token in the designated header or payload.
+5. **Leak Prevention**: If an agent transmits a dummy token to an unauthorized host or unmapped endpoint, VouchProxy aborts the request with `HTTP 403 Forbidden` and logs the event. Real secrets are never transmitted to unauthorized destinations.
+6. **PII and Identifier Scrubbing**: Configured request headers, URL parameters, and request bodies are filtered against regex rules to remove workstation usernames, system hostnames, and email addresses before network egress.
+7. **SSRF Defense**: Outbound dialers resolve upstream hosts and reject destinations pointing to private IPv4/IPv6 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback addresses (`127.0.0.0/8`), link-local blocks, and cloud metadata endpoints (`169.254.169.254`).
+8. **Memory Management**: Secret bytes are decrypted only when needed for upstream dispatch, stored in dedicated byte slices, and wiped using explicit memory zeroing loops (`crypto/subtle` and byte clearing) to prevent plaintext secrets from remaining in runtime memory.
 
 ---
 
-## 3. Quickstart & CLI Reference
+## Security Invariants
 
-### 3.1 Installation
+| Invariant | Implementation | Enforcement Action |
+|:---|:---|:---|
+| **Loopback Binding** | Proxy listens exclusively on `127.0.0.1` with dynamic port assignment. | Abort startup if interface is non-loopback. |
+| **Session Isolation** | Cryptographically random 32-byte token per supervisor execution. | Return `HTTP 407` on missing or invalid proxy auth. |
+| **Leak Mitigation** | Scans request headers, query strings, and bodies for dummy tokens. | Return `HTTP 403` if token target is not in policy allowlist. |
+| **Host Header Integrity** | Verifies matching between `CONNECT` host, TLS SNI, and `Host` header. | Terminate connection on mismatch to prevent DNS rebinding. |
+| **Storage Security** | Local files (`ca.key`, `vault.enc`) require strict `0600` permissions. | Refuse startup if permissions permit group or world access. |
+| **Process Tree Cleanup** | Monitors parent process and binds children to OS process groups. | Terminate all descendant processes when supervisor exits. |
+| **Sanitized Audit Log** | Audit system writes only hashes, domain names, and scrub counts. | Strict typing prevents raw secret values from reaching loggers. |
+
+---
+
+## Installation
+
+### Prerequisites
+- Go 1.23 or newer
+- Operating system: Linux (`amd64`, `arm64`), macOS (`amd64`, `arm64`), or Windows (`amd64`)
+
+### Build from Source
 ```bash
-# Clone and build
 git clone https://github.com/sshloktiwarii/vouchproxy.git
 cd vouchproxy
-CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o bin/vouchproxy cmd/vouchproxy/main.go
-sudo cp bin/vouchproxy /usr/local/bin/
+CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o bin/vouchproxy ./cmd/vouchproxy
 ```
 
-### 3.2 Initialize Security Enclave
+Copy the compiled binary into your system `PATH`:
 ```bash
-vouchproxy init
-```
-- Creates `~/.vouchproxy/` with `0700` permissions.
-- Generates local Root CA (`ca.crt` and `ca.key` with `0600` permissions).
-- Sets master vault passphrase and creates encrypted `vault.enc`.
-- Scaffolds starter `vouch.yaml` policy.
-
-### 3.3 Store Encrypted Credentials
-```bash
-# Prompted for passphrase & secret value with masked echo
-vouchproxy secret set OPENAI_API_KEY
-vouchproxy secret set ANTHROPIC_API_KEY
-vouchproxy secret set GITHUB_TOKEN
-
-# List registered keys and their bound dummy tokens (never displays secret values)
-vouchproxy secret list
-```
-
-### 3.4 Execute Sandboxed Agent
-```bash
-# Run any agent command behind VouchProxy
-vouchproxy run -- aider --model sonnet
-
-# Or run standard developer CLI tools
-vouchproxy run -- curl -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models
-```
-
-### 3.5 Inspect Audit Ledger
-```bash
-# Tail latest 20 events in reverse chronological order
-vouchproxy audit --tail
-
-# Filter by host or action
-vouchproxy audit --tail --host api.openai.com --action INJECT_SECRET
-
-# Output structured JSON for SIEM ingestion
-vouchproxy audit --json --limit 50
+sudo install -m 0755 bin/vouchproxy /usr/local/bin/vouchproxy
 ```
 
 ---
 
-## 4. Policy Configuration (`vouch.yaml`)
+## Configuration
+
+VouchProxy reads its configuration from `~/.vouchproxy/vouch.yaml` (or `./vouch.yaml`).
 
 ```yaml
 version: "1.0"
 
 settings:
-  strict_mode: false            # If true, block all unmapped outbound hosts with HTTP 502
-  proxy_auth_required: true     # Enforce per-session Proxy-Authorization token
-  mitm_cache_size: 256          # Bounded LRU leaf certificate cache
+  strict_mode: false            # Reject unconfigured outbound hosts with HTTP 502
+  proxy_auth_required: true     # Require per-session Proxy-Authorization token
+  mitm_cache_size: 256          # Maximum cached leaf certificates
   connect_timeout_seconds: 15
   request_timeout_seconds: 60
 
 scrubbing:
-  emails: true                  # Redacts RFC 5322 email patterns
-  usernames:                    # Redacts specified system usernames and hostnames
+  emails: true                  # Redact RFC 5322 email addresses
+  usernames:                    # Redact local system identifiers
     - "$USER"
     - "$HOSTNAME"
   custom_regex:
@@ -223,45 +143,93 @@ rules:
 
 ---
 
-## 5. Security Invariants
+## Usage
 
-| ID | Invariant | Specification | Failure Action |
-|:---|:---|:---|:---|
-| **INV-01** | **Loopback Only** | Proxy binds strictly to `127.0.0.1` ephemeral port. | Panic on startup if non-loopback. |
-| **INV-02** | **Session Auth** | Every run generates an unguessable 32-byte secret. | Return HTTP 407 Proxy Authentication Required. |
-| **INV-03** | **Dummy Exfiltration Trap** | Dummy token detected for unauthorized destination host. | Drop connection with HTTP 403 Forbidden; log alert. |
-| **INV-04** | **Zero Secret Logging** | `internal/audit` never receives raw secret values. | Enforced by type-safe `SecretBytes` wrapper. |
-| **INV-05** | **Memory Zeroing** | Decrypted secret buffers wiped with zeros (`ZeroBytes()`). | Eliminates plaintexts lingering in Go heap GC cycles. |
-| **INV-06** | **DNS Rebind Defense** | Enforces $\text{CONNECT Host} == \text{TLS SNI} == \text{HTTP Host}$. | Terminate connection on divergence. |
-| **INV-07** | **Strict File Permissions** | `vault.enc` and `ca.key` require `0600` permissions. | Refuse startup if group/world readable. |
-| **INV-08** | **Process Isolation** | POSIX process group / Windows Job Object supervisor. | Clean teardown; zero orphan/zombie child processes. |
-
----
-
-## 6. Performance Benchmarks
-
-Measured on Apple M5 (`darwin/arm64`):
-
+### 1. Initialize Enclave
+Generate the Root CA key pair, set up the master passphrase, and create the configuration directory:
+```bash
+vouchproxy init
 ```
-pkg: github.com/sshloktiwarii/vouchproxy/internal/proxy
-BenchmarkProxyPipeline-10    29954    39666 ns/op (0.039 ms)    12382 B/op    152 allocs/op
+This creates:
+- `~/.vouchproxy/ca.crt` and `~/.vouchproxy/ca.key` (`0600` permissions)
+- `~/.vouchproxy/vault.enc` (encrypted with Argon2id and AES-256-GCM)
+- `~/.vouchproxy/vouch.yaml`
+
+### 2. Manage Credentials
+Add secrets to the encrypted vault:
+```bash
+vouchproxy secret set OPENAI_API_KEY
+vouchproxy secret set ANTHROPIC_API_KEY
+vouchproxy secret set GITHUB_TOKEN
 ```
 
-- **Binary Size:** **7.7 MB** (`CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath`)
-- **Added Hot-Path Latency:** **0.039 ms** (Target was < 1.0 ms)
-- **Idle Memory:** **< 12 MB RSS**
-- **Concurrency Test:** **500 parallel requests** with zero data races (`go test -race`).
+List registered keys and their associated dummy tokens:
+```bash
+vouchproxy secret list
+```
+
+### 3. Run Commands Under the Proxy
+Execute commands with automatic proxy injection and dummy environment variables:
+```bash
+vouchproxy run -- aider --model sonnet
+```
+
+Run test requests with curl:
+```bash
+vouchproxy run -- curl -i -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models
+```
+
+### 4. Audit Log Inspection
+View outbound requests, dummy substitutions, and scrubbing actions:
+```bash
+# View the latest entries in real time
+vouchproxy audit --tail
+
+# Filter audit entries by host
+vouchproxy audit --tail --host api.openai.com
+
+# Emit JSON records for ingestion
+vouchproxy audit --json --limit 50
+```
+
+### 5. Canary Leak Detection
+Generate canary tokens to detect context prompt leakage or model exfiltration attempts:
+```bash
+# Generate a tracked canary token for a session
+vouchproxy canary generate --prompt-id "prompt-refactor-auth"
+
+# List active canaries
+vouchproxy canary list
+
+# Inspect canary trigger logs
+vouchproxy canary audit
+```
+
+### 6. Model Context Protocol (MCP) Wrapper
+Wrap standalone MCP servers (over stdio or HTTP-SSE) to sanitize tool calls and prevent credentials from entering context logs:
+```bash
+vouchproxy mcp wrap -- npx -y @modelcontextprotocol/server-filesystem /workspace
+```
 
 ---
 
-## 7. Roadmap
+## Testing
 
-- **v2.0:** Native MCP `stdio` and Streamable-HTTP JSON-RPC parser enforcing RFC 8707 resource indicators.
-- **v3.0:** Interactive Bubble Tea TUI approval for first-time outbound domains.
-- **v4.0:** OS-native keychain backends (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+Run unit and integration tests with the race detector enabled:
+```bash
+go test -v -race ./...
+```
+
+Run package-specific tests:
+```bash
+go test -v ./internal/vault
+go test -v ./internal/proxy
+go test -v ./internal/policy
+go test -v ./internal/certs
+```
 
 ---
 
-## 8. License
+## License
 
-MIT License. Designed with zero-trust systems engineering discipline.
+MIT License. See [LICENSE](LICENSE) for details.

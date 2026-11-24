@@ -22,6 +22,9 @@ vault.enc
 vault.enc.tmp
 ./vouchproxy/
 vouch.yaml.local
+.env
+.env.*
+*.env
 
 # SQLite Databases & WAL logs
 *.db
@@ -29,6 +32,13 @@ vouch.yaml.local
 *.db-shm
 *.sqlite
 *.sqlite3
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.bak
+.archify/
+.planning/
 
 # Test and coverage artifacts
 *.out

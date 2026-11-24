@@ -32,6 +32,11 @@ var (
 	buildErr         error
 )
 
+func TestMain(m *testing.M) {
+	_ = os.Setenv("VOUCH_ALLOW_LOOPBACK_UPSTREAM", "1")
+	os.Exit(m.Run())
+}
+
 // findRepoRoot walks upwards from the current directory looking for go.mod
 func findRepoRoot() string {
 	dir, err := os.Getwd()
