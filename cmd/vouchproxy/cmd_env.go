@@ -46,15 +46,18 @@ func detectShell(flagVal string) string {
 		}
 	}
 
-	if runtime.GOOS == "windows" {
-		return "powershell"
-	}
-
 	shell := os.Getenv("SHELL")
 	if strings.Contains(shell, "fish") {
 		return "fish"
 	}
 	if strings.Contains(shell, "pwsh") || strings.Contains(shell, "powershell") {
+		return "powershell"
+	}
+	if strings.Contains(shell, "bash") || strings.Contains(shell, "zsh") || strings.Contains(shell, "sh") {
+		return "sh"
+	}
+
+	if runtime.GOOS == "windows" {
 		return "powershell"
 	}
 	return "sh"
