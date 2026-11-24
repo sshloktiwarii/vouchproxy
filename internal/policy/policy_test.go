@@ -125,4 +125,20 @@ func TestPolicy_EvaluationRules(t *testing.T) {
 	if !res3.ShouldBlock || res3.BlockStatus != http.StatusForbidden {
 		t.Fatalf("expected dummy in query param to be blocked, got: %+v", res3)
 	}
+
+	// 4. Unpermitted dummy token in request body to mapped host -> ActionBlockLeak (HTTP 403)
+	req4, _ := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", nil)
+	body4 := []byte(`{"model": "gpt-4", "token": "VP_GITHUB_TOKEN_DUMMY_3e5f8a"}`)
+	res4 := pe.EvaluateRequestBody(req4, body4, dummyToKey)
+	if !res4.ShouldBlock || res4.BlockStatus != http.StatusForbidden || res4.Action != ActionBlockLeak {
+		t.Fatalf("expected unpermitted body dummy token to be blocked with 403, got: %+v", res4)
+	}
+
+	// 5. Permitted dummy token in request body to mapped host -> ActionInjectSecret
+	req5, _ := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", nil)
+	body5 := []byte(`{"model": "gpt-4", "token": "VP_OPENAI_API_KEY_DUMMY_8f9a2b"}`)
+	res5 := pe.EvaluateRequestBody(req5, body5, dummyToKey)
+	if res5.ShouldBlock || res5.Action != ActionInjectSecret {
+		t.Fatalf("expected permitted body dummy token to be accepted, got: %+v", res5)
+	}
 }

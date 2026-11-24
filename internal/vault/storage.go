@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // ValidateFilePermissions ensures a file is not accessible by other users.
 // On POSIX, it verifies the file does not have group or other permissions (0600).
+// On Windows, it verifies DACL security descriptors.
 func ValidateFilePermissions(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -19,13 +19,7 @@ func ValidateFilePermissions(path string) error {
 		return err
 	}
 
-	if runtime.GOOS != "windows" {
-		perm := info.Mode().Perm()
-		if perm&0077 != 0 {
-			return fmt.Errorf("insecure file permissions on %s: %04o (must be 0600 or stricter)", path, perm)
-		}
-	}
-	return nil
+	return validatePlatformPermissions(path, info)
 }
 
 // AtomicWriteFile writes data to a temporary file with 0600 permissions,
@@ -49,7 +43,7 @@ func AtomicWriteFile(targetPath string, data []byte) error {
 	}()
 
 	// Enforce 0600 permissions
-	if err := os.Chmod(tmpName, 0600); err != nil && runtime.GOOS != "windows" {
+	if err := enforceFilePermissions(tmpName); err != nil {
 		return fmt.Errorf("failed to set 0600 permissions: %w", err)
 	}
 

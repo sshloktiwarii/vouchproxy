@@ -230,12 +230,11 @@ func (pr *pipelineResult) ToAuditEvent(sessionID, host string, port int) audit.A
 
 // executePipeline performs dummy checking, secret injection, PII scrubbing, and upstream round-trip.
 func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Response, pipelineResult) {
-	// Pre-read body up to 1 MB for canary scanning and MCP inspection
+	// Pre-read body up to 10 MB for canary scanning and MCP inspection
 	var bodyBytes []byte
 	if req.Body != nil {
-		bodyBytes, _ = io.ReadAll(io.LimitReader(req.Body, 1024*1024))
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		req.ContentLength = int64(len(bodyBytes))
+		bodyBytes, _ = io.ReadAll(io.LimitReader(req.Body, 10*1024*1024))
+		req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), req.Body))
 	}
 
 	// 0. Canary Token Exfiltration Check
@@ -247,7 +246,15 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 	if len(canaries) > 0 {
 		rule := h.policyEngine.FindRule(req.Host, req.Method)
 		if rule == nil {
-			promptID := canary.ExtractPromptID(canaries[0])
+			var promptIDs []string
+			seenPrompts := make(map[string]bool)
+			for _, c := range canaries {
+				pid := canary.ExtractPromptID(c)
+				if !seenPrompts[pid] {
+					seenPrompts[pid] = true
+					promptIDs = append(promptIDs, pid)
+				}
+			}
 			res := pipelineResult{
 				HTTPMethod:    req.Method,
 				PathSanitized: req.URL.Path,
@@ -256,7 +263,7 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 			res.Action = policy.ActionBlockLeak
 			res.ShouldBlock = true
 			res.BlockStatus = http.StatusForbidden
-			res.ErrorMessage = fmt.Sprintf("Blocked attempt to exfiltrate canary token for prompt %s to unauthorized host %s", promptID, req.Host)
+			res.ErrorMessage = fmt.Sprintf("Blocked attempt to exfiltrate canary token for prompt(s): %s to unauthorized host %s", strings.Join(promptIDs, ", "), req.Host)
 			tui.GlobalFeed.Publish(tui.RequestEntry{
 				Method:    req.Method,
 				Host:      req.Host,
@@ -270,7 +277,7 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 	}
 
 	dummyToKey := h.vaultInstance.DummyToKeyMap()
-	eval := h.policyEngine.EvaluateRequest(req, dummyToKey)
+	eval := h.policyEngine.EvaluateRequestBody(req, bodyBytes, dummyToKey)
 
 	res := pipelineResult{
 		EvaluationResult: eval,
@@ -322,14 +329,17 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 		}
 	}
 
-	// 1b. MCP HTTP-SSE message rewriting: rewrite dummy tokens in JSON payload
+	// 1b. MCP HTTP-SSE message rewriting: rewrite dummy tokens in JSON payload for authorized hosts only
 	if len(bodyBytes) > 0 {
-		bodyStr := string(bodyBytes)
-		rewrittenStr := mcp.RewritePayloadString(bodyStr, h.vaultInstance)
-		if rewrittenStr != bodyStr {
-			bodyBytes = []byte(rewrittenStr)
-			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			req.ContentLength = int64(len(bodyBytes))
+		rule := h.policyEngine.FindRule(req.Host, req.Method)
+		if rule != nil {
+			bodyStr := string(bodyBytes)
+			rewrittenStr := mcp.RewritePayloadString(bodyStr, h.vaultInstance)
+			if rewrittenStr != bodyStr {
+				bodyBytes = []byte(rewrittenStr)
+				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				req.ContentLength = int64(len(bodyBytes))
+			}
 		}
 	}
 
@@ -380,11 +390,19 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 
 	// Inspect upstream response for canary regurgitation
 	if resp != nil && resp.Body != nil {
-		respBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-		resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
-		respCanaries := canary.FindCanaryTokens(string(respBodyBytes))
+		head, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), resp.Body))
+		respCanaries := canary.FindCanaryTokens(string(head))
 		if len(respCanaries) > 0 {
-			promptID := canary.ExtractPromptID(respCanaries[0])
+			var promptIDs []string
+			seenPrompts := make(map[string]bool)
+			for _, c := range respCanaries {
+				pid := canary.ExtractPromptID(c)
+				if !seenPrompts[pid] {
+					seenPrompts[pid] = true
+					promptIDs = append(promptIDs, pid)
+				}
+			}
 			if h.auditLogger != nil {
 				_ = h.auditLogger.Log(audit.AuditEvent{
 					EventID:         fmt.Sprintf("ev_canary_%d", time.Now().UnixNano()),
@@ -396,7 +414,7 @@ func (h *Handler) executePipeline(req *http.Request, start time.Time) (*http.Res
 					Action:          "BLOCK_LEAK",
 					HTTPStatus:      resp.StatusCode,
 					LatencyMs:       res.LatencyMs,
-					Details:         fmt.Sprintf("Upstream response contained canary token for prompt %s", promptID),
+					Details:         fmt.Sprintf("Upstream response contained canary token for prompt(s): %s", strings.Join(promptIDs, ", ")),
 				})
 			}
 		}

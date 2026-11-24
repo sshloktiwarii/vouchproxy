@@ -7,10 +7,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -397,6 +399,10 @@ func runRun(args []string) int {
 		return 1
 	}
 
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigChan)
+
 	vouchDir := defaultVouchDir()
 	if *configPath == "" {
 		*configPath = filepath.Join(vouchDir, "vouch.yaml")
@@ -489,13 +495,22 @@ func runRun(args []string) int {
 
 	// 6. Launch Supervised Child Command
 	dummyMap := v.DummyMap()
+	var childStdin io.Reader = os.Stdin
+	var childStdout io.Writer = os.Stdout
+	if *mcpStdio {
+		childStdin = nil
+		childStdout = nil
+	} else if *tuiMode {
+		childStdin = nil
+	}
+
 	childCmd, err := runner.PrepareCommand(runner.SubprocessConfig{
 		Command:     cmdArgs,
 		ProxyURL:    authProxyURL,
 		CACertPath:  caCertPath,
 		DummyTokens: dummyMap,
-		Stdin:       os.Stdin,
-		Stdout:      os.Stdout,
+		Stdin:       childStdin,
+		Stdout:      childStdout,
 		Stderr:      os.Stderr,
 	})
 	if err != nil {
@@ -504,8 +519,9 @@ func runRun(args []string) int {
 	}
 
 	var cleanupTUI func()
+	var tuiQuitChan <-chan struct{}
 	if *tuiMode {
-		_, cleanupTUI = tui.StartTUI()
+		_, tuiQuitChan, cleanupTUI = tui.StartTUI()
 	}
 	defer func() {
 		if cleanupTUI != nil {
@@ -513,18 +529,23 @@ func runRun(args []string) int {
 		}
 	}()
 
+	select {
+	case sig := <-sigChan:
+		if cleanupTrust != nil {
+			cleanupTrust()
+		}
+		if s, ok := sig.(syscall.Signal); ok {
+			return 128 + int(s)
+		}
+		return 130
+	default:
+	}
+
 	var exitCode int
 	if *mcpStdio {
-		err = mcp.RunStdioProxy(childCmd, v)
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = 1
-			}
-		}
+		exitCode, err = mcp.RunStdioProxyWithSignals(childCmd, v, sigChan)
 	} else {
-		exitCode, err = runner.RunSupervised(childCmd)
+		exitCode, err = runner.RunSupervisedWithSignals(childCmd, sigChan, tuiQuitChan)
 	}
 
 	if err != nil && exitCode == 0 {
@@ -583,6 +604,7 @@ func runCanary(args []string) {
 
 		tok, err := canary.Verify(*token)
 		if err != nil {
+			fmt.Printf("Verification failed: %v\n", err)
 			fmt.Fprintf(os.Stderr, "Error: canary token verification failed: %v\n", err)
 			os.Exit(1)
 		}

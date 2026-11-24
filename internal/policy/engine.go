@@ -112,6 +112,15 @@ func (pe *PolicyEngine) EvaluateRequest(
 	req *http.Request,
 	dummyToKey map[string]string,
 ) EvaluationResult {
+	return pe.EvaluateRequestBody(req, nil, dummyToKey)
+}
+
+// EvaluateRequestBody inspects headers, URL path, request body, and dummy tokens to determine action.
+func (pe *PolicyEngine) EvaluateRequestBody(
+	req *http.Request,
+	body []byte,
+	dummyToKey map[string]string,
+) EvaluationResult {
 	targetHost := req.Host
 	if targetHost == "" && req.URL != nil {
 		targetHost = req.URL.Host
@@ -129,6 +138,10 @@ func (pe *PolicyEngine) EvaluateRequest(
 		searchCorpus.WriteString(strings.Join(hVals, " "))
 		searchCorpus.WriteString("\n")
 	}
+	if len(body) > 0 {
+		searchCorpus.Write(body)
+		searchCorpus.WriteString("\n")
+	}
 
 	foundDummies := FindDummyTokens(searchCorpus.String(), dummyToKey)
 
@@ -144,7 +157,8 @@ func (pe *PolicyEngine) EvaluateRequest(
 			}
 		}
 
-		// Verify each dummy token maps to an allowed secret in this rule
+		// Verify each dummy token maps to an allowed secret in this rule.
+		// If a rule does not explicitly inject this secret, sending it is considered an exfiltration attempt (VULN-03 fix).
 		var allowedKeys []string
 		for _, dummy := range foundDummies {
 			keyName := dummyToKey[dummy]

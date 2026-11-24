@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"golang.org/x/term"
 )
 
@@ -67,10 +68,11 @@ type Model struct {
 	subChan      chan RequestEntry
 	quitting     bool
 	headlessMode bool
+	onQuit       func()
 }
 
 // NewModel initializes the TUI model.
-func NewModel() Model {
+func NewModel(onQuit func()) Model {
 	return Model{
 		requests:    make([]RequestEntry, 0),
 		selectedIdx: 0,
@@ -78,6 +80,7 @@ func NewModel() Model {
 		width:       100,
 		height:      24,
 		subChan:     GlobalFeed.Subscribe(),
+		onQuit:      onQuit,
 	}
 }
 
@@ -100,6 +103,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.quitting = true
+			if m.onQuit != nil {
+				m.onQuit()
+			}
 			return m, tea.Quit
 		case "tab":
 			m.activePane = (m.activePane + 1) % 2
@@ -138,13 +144,11 @@ var (
 
 	// Amber styling for PII redactions: \x1b[33m
 	amberStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.ANSIColor(33)).
-			Bold(true)
+			Foreground(lipgloss.ANSIColor(3))
 
 	// Cyan styling for Injected Headers: \x1b[36m
 	cyanStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.ANSIColor(36)).
-			Bold(true)
+			Foreground(lipgloss.ANSIColor(6))
 
 	paneBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -231,18 +235,34 @@ func (m Model) View() string {
 
 // IsTerminal checks if both stdin and stdout are interactive terminals.
 func IsTerminal() bool {
+	if os.Getenv("VOUCH_TUI_FORCE") == "1" {
+		return true
+	}
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-// StartTUI launches the Bubbletea program in a separate goroutine or falls back to headless notice.
-func StartTUI() (*tea.Program, func()) {
-	if !IsTerminal() {
-		fmt.Fprintf(os.Stderr, "[TUI] non-TTY environment detected; running in headless mode\n")
-		return nil, func() {}
+// StartTUI launches the Bubbletea program in a separate goroutine and returns a quit channel and cleanup function.
+func StartTUI() (*tea.Program, <-chan struct{}, func()) {
+	lipgloss.SetColorProfile(termenv.ANSI)
+
+	quitChan := make(chan struct{})
+	var quitOnce sync.Once
+	onQuit := func() {
+		quitOnce.Do(func() {
+			close(quitChan)
+		})
 	}
 
-	m := NewModel()
-	p := tea.NewProgram(m)
+	m := NewModel(onQuit)
+
+	var opts []tea.ProgramOption
+	opts = append(opts, tea.WithInput(os.Stdin), tea.WithOutput(os.Stdout))
+
+	if !IsTerminal() {
+		fmt.Fprintf(os.Stderr, "[TUI] non-TTY environment detected; running in headless mode\n")
+	}
+
+	p := tea.NewProgram(m, opts...)
 
 	go func() {
 		if _, err := p.Run(); err != nil {
@@ -253,5 +273,5 @@ func StartTUI() (*tea.Program, func()) {
 	cleanup := func() {
 		p.Quit()
 	}
-	return p, cleanup
+	return p, quitChan, cleanup
 }

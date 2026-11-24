@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 )
 
 var (
@@ -85,23 +86,25 @@ func (cs *CompiledScrubber) ScrubText(input string) (string, int) {
 	return out, count
 }
 
-// ScrubHeaders inspects and scrubs standard outbound HTTP headers (e.g. User-Agent, From).
+// ScrubHeaders inspects and scrubs all outbound HTTP headers, skipping proxy authorization.
 func (cs *CompiledScrubber) ScrubHeaders(headers http.Header) int {
 	if cs == nil || len(cs.rules) == 0 {
 		return 0
 	}
 
 	scrubCount := 0
-	// Sensitive headers often leaking PII
-	targetHeaders := []string{"User-Agent", "From", "X-Forwarded-For", "Referer"}
-
-	for _, key := range targetHeaders {
-		val := headers.Get(key)
-		if val != "" {
-			scrubbed, count := cs.ScrubText(val)
-			if count > 0 {
-				headers.Set(key, scrubbed)
-				scrubCount += count
+	for key, values := range headers {
+		// Do not modify proxy authentication credentials
+		if strings.EqualFold(key, "Proxy-Authorization") {
+			continue
+		}
+		for i, val := range values {
+			if val != "" {
+				scrubbed, count := cs.ScrubText(val)
+				if count > 0 {
+					values[i] = scrubbed
+					scrubCount += count
+				}
 			}
 		}
 	}

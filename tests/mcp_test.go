@@ -185,9 +185,15 @@ func TestE2E_R4_MCP_HTTPSSEMessageRewriting(t *testing.T) {
 	u, _ := url.Parse(upstream.URL)
 	customRules := []policy.Rule{
 		{
-			Name:           "Upstream MCP Rule",
-			Host:           u.Host,
-			MatchType:      "exact",
+			Name:      "Upstream MCP Rule",
+			Host:      u.Host,
+			MatchType: "exact",
+			Headers: []policy.HeaderRule{
+				{
+					Name:   "Authorization",
+					Secret: "OPENAI_API_KEY",
+				},
+			},
 			AllowedMethods: []string{"GET", "POST"},
 		},
 	}

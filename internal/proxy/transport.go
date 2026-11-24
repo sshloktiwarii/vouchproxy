@@ -6,17 +6,36 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
 
-// UpstreamTransport handles outbound dialing to upstream servers with DNS pinning and connection pooling.
+// UpstreamTransport handles outbound dialing to upstream servers with DNS pinning, SSRF filtering, and connection pooling.
 type UpstreamTransport struct {
 	client *http.Client
 	mu     sync.RWMutex
 }
 
-// NewUpstreamTransport creates an optimized HTTP transport with connection reuse and secure timeouts.
+// isProhibitedIP checks whether an IP is private, loopback, link-local, or unspecified.
+func isProhibitedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() {
+		return os.Getenv("VOUCH_ALLOW_LOOPBACK_UPSTREAM") != "1"
+	}
+	if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return os.Getenv("VOUCH_ALLOW_LOOPBACK_UPSTREAM") != "1"
+	}
+	// AWS / GCP / Azure metadata endpoint: 169.254.169.254
+	if ip.Equal(net.ParseIP("169.254.169.254")) {
+		return true
+	}
+	return false
+}
+
+// NewUpstreamTransport creates an optimized HTTP transport with connection reuse, SSRF defense, and secure timeouts.
 func NewUpstreamTransport(timeout time.Duration) *UpstreamTransport {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -29,8 +48,35 @@ func NewUpstreamTransport(timeout time.Duration) *UpstreamTransport {
 
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Secure dial with timeout
-			return dialer.DialContext(ctx, network, addr)
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr
+				port = "443"
+			}
+
+			// Validate and pin IP address to prevent DNS rebinding and SSRF
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve host %s: %w", host, err)
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IP addresses found for host %s", host)
+			}
+
+			var pinnedIP net.IP
+			for _, ipAddr := range ips {
+				if !isProhibitedIP(ipAddr.IP) {
+					pinnedIP = ipAddr.IP
+					break
+				}
+			}
+
+			if pinnedIP == nil {
+				return nil, fmt.Errorf("SSRF protection blocked dial to %s (resolves to restricted IP: %s)", host, ips[0].IP.String())
+			}
+
+			pinnedAddr := net.JoinHostPort(pinnedIP.String(), port)
+			return dialer.DialContext(ctx, network, pinnedAddr)
 		},
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,

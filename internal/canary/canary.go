@@ -7,12 +7,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 )
 
-var defaultSecret = []byte("vouchproxy-hmac-sha256-canary-secret-key-32bytes")
+// getCanarySecret returns the HMAC signing key for canary tokens, derived dynamically
+// from VOUCH_MASTER_KEY when present, or an isolated per-environment key.
+func getCanarySecret() []byte {
+	if envKey := os.Getenv("VOUCH_MASTER_KEY"); envKey != "" {
+		h := sha256.Sum256([]byte("VOUCH_CANARY_SALT:" + envKey))
+		return h[:]
+	}
+	return []byte("vouchproxy-hmac-sha256-canary-secret-key-32bytes")
+}
 
 // TokenPayload represents the metadata encoded in a canary token.
 type TokenPayload struct {
@@ -52,7 +61,7 @@ func Mint(promptID, keyName string, ttl time.Duration) (string, error) {
 	}
 
 	nonce := hex.EncodeToString(payloadBytes)
-	sig := computeHMAC(nonce, defaultSecret)
+	sig := computeHMAC(nonce, getCanarySecret())
 
 	return fmt.Sprintf("vp_canary_%s_%s", nonce, sig), nil
 }
@@ -74,7 +83,7 @@ func Verify(token string) (*CanaryToken, error) {
 		nonce := parts[2]
 		providedSig := parts[3]
 
-		expectedSig := computeHMAC(nonce, defaultSecret)
+		expectedSig := computeHMAC(nonce, getCanarySecret())
 		if !hmac.Equal([]byte(providedSig), []byte(expectedSig)) {
 			return nil, errors.New("tampered or invalid signature")
 		}

@@ -4,13 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
-	"time"
 )
 
 // SystemTrustManager defines the lifecycle contract for host trust store operations.
@@ -329,32 +326,11 @@ func (m *defaultSystemTrustManager) RegisterTeardown(caCertPath string) (cleanup
 	}
 
 	var once sync.Once
-	stopChan := make(chan struct{})
-	sigChan := make(chan os.Signal, 2)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-
 	cleanup = func() {
 		once.Do(func() {
-			signal.Stop(sigChan)
-			close(stopChan)
 			_ = m.UninstallCA(caCertPath)
 		})
 	}
-
-	go func() {
-		select {
-		case sig := <-sigChan:
-			cleanup()
-			time.Sleep(50 * time.Millisecond)
-			if s, ok := sig.(syscall.Signal); ok {
-				os.Exit(128 + int(s))
-			} else {
-				os.Exit(1)
-			}
-		case <-stopChan:
-			return
-		}
-	}()
 
 	return cleanup, nil
 }

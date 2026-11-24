@@ -9,8 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
+	"time"
 
+	"github.com/sshloktiwarii/vouchproxy/internal/runner"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
 )
 
@@ -45,10 +46,92 @@ type FilterResult struct {
 	Rewritten    []byte
 }
 
+// isSensitiveValue checks for forbidden files and directory traversals recursively.
+func isSensitiveValue(v any) (bool, string) {
+	switch val := v.(type) {
+	case string:
+		lower := strings.ToLower(val)
+		sensitiveTargets := []string{
+			"vault.enc",
+			"ca.key",
+			"/etc/passwd",
+			"/etc/shadow",
+			".ssh/id_rsa",
+			".ssh/id_ed25519",
+			"id_rsa",
+			"id_ed25519",
+		}
+		for _, s := range sensitiveTargets {
+			if strings.Contains(lower, s) {
+				return true, val
+			}
+		}
+		if val == ".." || strings.Contains(val, "../") || strings.Contains(val, `..\`) || strings.Contains(val, "/..") || strings.Contains(val, `\..`) {
+			return true, val
+		}
+	case map[string]any:
+		for _, item := range val {
+			if blocked, target := isSensitiveValue(item); blocked {
+				return true, target
+			}
+		}
+	case []any:
+		for _, item := range val {
+			if blocked, target := isSensitiveValue(item); blocked {
+				return true, target
+			}
+		}
+	}
+	return false, ""
+}
+
 // InspectToolCall analyzes an MCP request, blocking forbidden file reads and rewriting dummy tokens.
 func InspectToolCall(reqBytes []byte, v *vault.Vault) FilterResult {
+	trimmed := bytes.TrimSpace(reqBytes)
+	if len(trimmed) == 0 {
+		return FilterResult{Rewritten: reqBytes}
+	}
+
+	// 0. Check for JSON-RPC 2.0 syntax / parse errors (-32700)
+	var raw any
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return FilterResult{
+			Blocked:      true,
+			ErrorCode:    -32700,
+			ErrorMessage: "Parse error: invalid JSON-RPC 2.0",
+		}
+	}
+
+	// Batch JSON-RPC request support: detect array [...]
+	if trimmed[0] == '[' {
+		var batch []json.RawMessage
+		if err := json.Unmarshal(trimmed, &batch); err == nil {
+			var rewrittenBatch []json.RawMessage
+			modified := false
+			for _, item := range batch {
+				res := InspectToolCall(item, v)
+				if res.Blocked {
+					return res
+				}
+				if len(res.Rewritten) > 0 && !bytes.Equal(res.Rewritten, item) {
+					modified = true
+					rewrittenBatch = append(rewrittenBatch, json.RawMessage(res.Rewritten))
+				} else {
+					rewrittenBatch = append(rewrittenBatch, item)
+				}
+			}
+			if modified {
+				out, err := json.Marshal(rewrittenBatch)
+				if err == nil {
+					return FilterResult{Rewritten: out}
+				}
+			}
+			return FilterResult{Rewritten: reqBytes}
+		}
+	}
+
 	var req JSONRPCRequest
-	if err := json.Unmarshal(reqBytes, &req); err != nil {
+	if err := json.Unmarshal(trimmed, &req); err != nil {
 		return FilterResult{Rewritten: reqBytes}
 	}
 
@@ -61,17 +144,12 @@ func InspectToolCall(reqBytes []byte, v *vault.Vault) FilterResult {
 		return FilterResult{Rewritten: reqBytes}
 	}
 
-	// 1. Forbidden path check (e.g. vault.enc, ca.key)
-	for _, val := range args {
-		if strVal, ok := val.(string); ok {
-			lower := strings.ToLower(strVal)
-			if strings.Contains(lower, "vault.enc") || strings.Contains(lower, "ca.key") {
-				return FilterResult{
-					Blocked:      true,
-					ErrorCode:    -32602,
-					ErrorMessage: fmt.Sprintf("Access to sensitive file %q blocked by VouchProxy MCP semantic firewall", strVal),
-				}
-			}
+	// 1. Forbidden path check (e.g. vault.enc, ca.key, /etc/passwd, /etc/shadow, etc.)
+	if blocked, target := isSensitiveValue(args); blocked {
+		return FilterResult{
+			Blocked:      true,
+			ErrorCode:    -32602,
+			ErrorMessage: fmt.Sprintf("Access to sensitive target %q blocked by VouchProxy MCP semantic firewall", target),
 		}
 	}
 
@@ -137,26 +215,37 @@ func InspectToolCall(reqBytes []byte, v *vault.Vault) FilterResult {
 
 // RunStdioProxy wraps child process stdio, applying JSON-RPC inspection to incoming lines.
 func RunStdioProxy(childCmd *exec.Cmd, v *vault.Vault) error {
+	_, err := RunStdioProxyWithSignals(childCmd, v, nil)
+	return err
+}
+
+// RunStdioProxyWithSignals wraps child process stdio, coordinating with signals and semantic inspection.
+func RunStdioProxyWithSignals(childCmd *exec.Cmd, v *vault.Vault, sigChan <-chan os.Signal) (int, error) {
 	childStdin, err := childCmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("failed to open child stdin pipe: %w", err)
+		return 1, fmt.Errorf("failed to open child stdin pipe: %w", err)
 	}
 	childStdout, err := childCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to open child stdout pipe: %w", err)
+		return 1, fmt.Errorf("failed to open child stdout pipe: %w", err)
 	}
 	childCmd.Stderr = os.Stderr
 
+	runner.SetProcessGroup(childCmd)
+
 	if err := childCmd.Start(); err != nil {
-		return fmt.Errorf("failed to start child command: %w", err)
+		return 1, fmt.Errorf("failed to start child command: %w", err)
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	stdoutDone := make(chan struct{})
+	// Stream 2: Child Stdout -> Parent Stdout
+	go func() {
+		defer close(stdoutDone)
+		_, _ = io.Copy(os.Stdout, childStdout)
+	}()
 
 	// Stream 1: Parent Stdin -> Semantic Firewall -> Child Stdin
 	go func() {
-		defer wg.Done()
 		defer childStdin.Close()
 
 		reader := bufio.NewReader(os.Stdin)
@@ -168,38 +257,86 @@ func RunStdioProxy(childCmd *exec.Cmd, v *vault.Vault) error {
 
 				if res.Blocked {
 					// Return JSON-RPC error directly to parent stdout (client)
+					var respBytes []byte
 					var req JSONRPCRequest
-					_ = json.Unmarshal(trimmed, &req)
-
-					resp := JSONRPCResponse{
-						JSONRPC: "2.0",
-						ID:      req.ID,
-						Error: &JSONRPCError{
-							Code:    res.ErrorCode,
-							Message: res.ErrorMessage,
-						},
+					if err := json.Unmarshal(trimmed, &req); err == nil && req.Method != "" {
+						resp := JSONRPCResponse{
+							JSONRPC: "2.0",
+							ID:      req.ID,
+							Error: &JSONRPCError{
+								Code:    res.ErrorCode,
+								Message: res.ErrorMessage,
+							},
+						}
+						respBytes, _ = json.Marshal(resp)
+					} else if len(trimmed) > 0 && trimmed[0] == '[' {
+						var batch []JSONRPCRequest
+						if err := json.Unmarshal(trimmed, &batch); err == nil && len(batch) > 0 {
+							var batchResp []JSONRPCResponse
+							for _, b := range batch {
+								batchResp = append(batchResp, JSONRPCResponse{
+									JSONRPC: "2.0",
+									ID:      b.ID,
+									Error: &JSONRPCError{
+										Code:    res.ErrorCode,
+										Message: res.ErrorMessage,
+									},
+								})
+							}
+							respBytes, _ = json.Marshal(batchResp)
+						}
 					}
-					respBytes, _ := json.Marshal(resp)
+					if len(respBytes) == 0 {
+						resp := JSONRPCResponse{
+							JSONRPC: "2.0",
+							ID:      nil,
+							Error: &JSONRPCError{
+								Code:    res.ErrorCode,
+								Message: res.ErrorMessage,
+							},
+						}
+						respBytes, _ = json.Marshal(resp)
+					}
 					os.Stdout.Write(append(respBytes, '\n'))
 				} else {
-					childStdin.Write(append(res.Rewritten, '\n'))
+					_, writeErr := childStdin.Write(append(res.Rewritten, '\n'))
+					if writeErr != nil {
+						return
+					}
 				}
 			}
 			if err != nil {
-				break
+				return
 			}
 		}
 	}()
 
-	// Stream 2: Child Stdout -> Parent Stdout
+	childDone := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(os.Stdout, childStdout)
+		childDone <- childCmd.Wait()
 	}()
 
-	waitErr := childCmd.Wait()
-	wg.Wait()
-	return waitErr
+	select {
+	case sig := <-sigChan:
+		_ = runner.TerminateProcessGroup(childCmd)
+		select {
+		case err := <-childDone:
+			<-stdoutDone
+			return runner.ExtractExitCode(err), nil
+		case <-time.After(2 * time.Second):
+			_ = runner.KillProcessGroup(childCmd)
+			<-childDone
+			<-stdoutDone
+			if s, ok := sig.(interface{ Signal() }); ok {
+				_ = s
+			}
+			return 130, nil
+		}
+
+	case err := <-childDone:
+		<-stdoutDone
+		return runner.ExtractExitCode(err), err
+	}
 }
 
 // RewritePayloadString replaces dummy tokens in a JSON/text payload string.

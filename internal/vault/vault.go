@@ -145,10 +145,7 @@ func (v *Vault) Get(key string) (SecretBytes, error) {
 		return nil, fmt.Errorf("secret %q not found in vault", key)
 	}
 
-	valBytes := []byte(entry.Value)
-	sec := make(SecretBytes, len(valBytes))
-	copy(sec, valBytes)
-	return sec, nil
+	return entry.Value.Clone(), nil
 }
 
 // Set adds or updates a secret and atomically persists the encrypted vault to disk.
@@ -162,9 +159,12 @@ func (v *Vault) Set(key string, value []byte) error {
 		createdAt = existing.CreatedAt
 	}
 
+	valCopy := make(SecretBytes, len(value))
+	copy(valCopy, value)
+
 	v.secrets[key] = SecretEntry{
 		KeyName:   key,
-		Value:     string(value),
+		Value:     valCopy,
 		CreatedAt: createdAt,
 		UpdatedAt: now,
 	}
@@ -237,8 +237,7 @@ func (v *Vault) Close() {
 	}
 	// Zero secret values
 	for k, entry := range v.secrets {
-		b := []byte(entry.Value)
-		crypto.ZeroBytes(b)
+		entry.Value.Zero()
 		delete(v.secrets, k)
 	}
 }

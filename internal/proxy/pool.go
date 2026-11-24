@@ -29,9 +29,13 @@ func GetCopyBuffer() *[]byte {
 	return bufferPool.Get().(*[]byte)
 }
 
-// PutCopyBuffer returns a 32 KB byte slice back to the pool.
+// PutCopyBuffer returns a 32 KB byte slice back to the pool after securely zeroing contents.
 func PutCopyBuffer(b *[]byte) {
 	if b != nil && len(*b) == BufferSize {
+		// Zero the buffer before returning to pool to prevent residual plaintext data leakage (VULN-07 fix)
+		for i := range *b {
+			(*b)[i] = 0
+		}
 		bufferPool.Put(b)
 	}
 }
@@ -43,9 +47,14 @@ func GetBytesBuffer() *bytes.Buffer {
 	return buf
 }
 
-// PutBytesBuffer returns a bytes.Buffer back to the pool after resetting.
+// PutBytesBuffer returns a bytes.Buffer back to the pool after zeroing and resetting.
 func PutBytesBuffer(buf *bytes.Buffer) {
 	if buf != nil {
+		// Securely wipe underlying buffer memory before recycling
+		b := buf.Bytes()
+		for i := range b {
+			b[i] = 0
+		}
 		buf.Reset()
 		bytesBufferPool.Put(buf)
 	}
