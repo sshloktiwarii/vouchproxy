@@ -1,4 +1,4 @@
-package tests
+package proxy
 
 import (
 	"fmt"
@@ -16,11 +16,11 @@ import (
 	"github.com/sshloktiwarii/vouchproxy/internal/audit"
 	"github.com/sshloktiwarii/vouchproxy/internal/certs"
 	"github.com/sshloktiwarii/vouchproxy/internal/policy"
-	"github.com/sshloktiwarii/vouchproxy/internal/proxy"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
 )
 
-func setupTestSystem(t *testing.T, customRules []policy.Rule) (*proxy.Server, *vault.Vault, *certs.CertificateAuthority, string, string) {
+func setupTestSystem(t *testing.T, customRules []policy.Rule) (*Server, *vault.Vault, *certs.CertificateAuthority, string, string) {
+	_ = os.Setenv("VOUCH_ALLOW_LOOPBACK_UPSTREAM", "1")
 	tmpDir, err := os.MkdirTemp("", "vouch-adv-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func setupTestSystem(t *testing.T, customRules []policy.Rule) (*proxy.Server, *v
 	}
 
 	sessionSecret := "test-session-secret-token"
-	srv, err := proxy.NewServer(proxy.ServerOptions{
+	srv, err := NewServer(ServerOptions{
 		SessionID:     "adv_session",
 		SessionSecret: sessionSecret,
 		Config:        cfg,

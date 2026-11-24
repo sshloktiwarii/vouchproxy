@@ -28,7 +28,7 @@ import (
 	"github.com/sshloktiwarii/vouchproxy/internal/runner"
 	"github.com/sshloktiwarii/vouchproxy/internal/tui"
 	"github.com/sshloktiwarii/vouchproxy/internal/vault"
-	"github.com/sshloktiwarii/vouchproxy/pkg/version"
+	"github.com/sshloktiwarii/vouchproxy/internal/version"
 )
 
 func defaultVouchDir() string {
