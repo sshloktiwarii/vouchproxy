@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -344,7 +343,7 @@ func TestE2E_R1_Edge_WindowResizeTerminalSignals(t *testing.T) {
 	// Dispatch multiple SIGWINCH signals to simulate resizing
 	for i := 0; i < 3; i++ {
 		time.Sleep(100 * time.Millisecond)
-		_ = cmd.Process.Signal(syscall.SIGWINCH)
+		_ = sendWindowResizeSignal(cmd.Process)
 	}
 
 	// Ensure process did not crash on resize
